@@ -1,8 +1,8 @@
 # config.default.mk
 
 CC       := gcc
-CFLAGS   ?= -Wall -Wextra -std=c17 -Wno-unused-variable -O2
-LDFLAGS  ?= 
+CFLAGS   ?= -Wall -Wextra -std=c17 -Wno-unused-variable -g -O0 -fno-omit-frame-pointer
+LDFLAGS  ?= -rdynamic
 INCLUDES ?= -Isrc
 
 # Detect llvm-config (allow override via environment or command-line)

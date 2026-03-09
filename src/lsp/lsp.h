@@ -243,6 +243,7 @@ void resolve_imports(LSPServer *server, LSPDocument *doc, BuildConfig *config,
                      GrowableArray *imported_modules);
 void build_module_registry(LSPServer *server, const char *workspace_uri);
 const char *lookup_module(LSPServer *server, const char *module_name);
+void lsp_negative_cache_clear(void);
 AstNode *parse_imported_module_ast(LSPServer *server, const char *module_uri,
                                    BuildConfig *config, ArenaAllocator *arena);
 
@@ -277,6 +278,7 @@ void lsp_send_error(int id, int code, const char *message);
 char *extract_string(const char *json, const char *key, ArenaAllocator *arena);
 int extract_int(const char *json, const char *key);
 LSPPosition extract_position(const char *json);
+const char *find_json_value(const char *json, const char *key);
 
 // JSON serialization helpers
 void serialize_diagnostics_to_json(const char *uri, LSPDiagnostic *diagnostics,

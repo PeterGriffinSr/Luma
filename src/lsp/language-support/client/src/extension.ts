@@ -1,4 +1,4 @@
-import { workspace, ExtensionContext, commands, window } from "vscode";
+import { workspace, ExtensionContext, commands, window, Uri } from "vscode";
 
 import {
   LanguageClient,
@@ -9,28 +9,42 @@ import {
 
 let client: LanguageClient;
 
+// ← Update these two paths for your machine
+const LUMA_BIN = "/home/connor/projects/lsp_servers/Luma/luma";
+const LOG_FILE = "/tmp/luma_lsp.log";
+
 export function activate(context: ExtensionContext) {
-  // If the extension is launched in debug mode then the debug server options are used
-    // Otherwise the run options are used
+  // We wrap the binary in a shell one-liner so stderr goes to the log file
+  // without touching the stdio streams the LSP client uses for JSON-RPC.
+  // stdout (JSON-RPC) is untouched; only stderr is redirected.
   const serverOptions: ServerOptions = {
-    //? the name of the project is "luma" in the Makefile so this will be the name of exe for users
-    // command: "luma",
-    command: "/home/sovietpancakes/Desktop/Code/luma/luma",
+    command: "sh",
     transport: TransportKind.stdio,
-    args: ["-lsp"]
+    args: [
+      "-c",
+      // The exec replaces the shell so the PID is the luma process itself.
+      // stderr goes to the log file; stdout stays connected to the pipe.
+      `exec "${LUMA_BIN}" -lsp 2>>"${LOG_FILE}"`,
+    ],
   };
 
-  // Options to control the language client
+  const outputChannel = window.createOutputChannel("Luma LSP");
+  outputChannel.appendLine(`LSP binary:  ${LUMA_BIN}`);
+  outputChannel.appendLine(`LSP log:     ${LOG_FILE}`);
+  outputChannel.appendLine(`Tail with:   tail -f ${LOG_FILE}`);
+  outputChannel.show(true);
+
+  const traceChannel = window.createOutputChannel("Luma LSP Trace");
+
   const clientOptions: LanguageClientOptions = {
-    // Register the server for all documents by default
     documentSelector: [{ scheme: "file", language: "luma" }],
     synchronize: {
-      // Notify the server about file changes to '.clientrc files contained in the workspace
       fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
     },
+    outputChannel,
+    traceOutputChannel: traceChannel,
   };
 
-  // Create the language client and start the client.
   client = new LanguageClient(
     "luma-lsp",
     "Luma LSP",
@@ -38,13 +52,20 @@ export function activate(context: ExtensionContext) {
     clientOptions
   );
 
-  // Start the client. This will also launch the server
   client.start();
+
+  // "Luma: Open LSP Log" in Ctrl+Shift+P
+  context.subscriptions.push(
+    commands.registerCommand("luma.openLog", () => {
+      workspace.openTextDocument(Uri.file(LOG_FILE)).then(
+        (doc) => window.showTextDocument(doc),
+        () => window.showErrorMessage(`Could not open: ${LOG_FILE}`)
+      );
+    })
+  );
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  if (!client) {
-    return undefined;
-  }
+  if (!client) return undefined;
   return client.stop();
 }

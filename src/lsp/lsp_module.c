@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #include "lsp.h"
@@ -219,40 +220,99 @@ void build_module_registry(LSPServer *server, const char *workspace_uri) {
   arena_destroy(&temp_arena);
 }
 
+// ---------------------------------------------------------------------------
+// Negative cache: module names we already know don't exist anywhere.
+// Avoids repeated fopen() probes on every keystroke — especially important
+// on WSL where cross-boundary filesystem calls are slow (50-200ms each).
+// ---------------------------------------------------------------------------
+#define NEGATIVE_CACHE_MAX 64
+static const char *negative_cache[NEGATIVE_CACHE_MAX];
+static size_t      negative_cache_count = 0;
+
+static int negative_cache_contains(const char *module_name) {
+  for (size_t i = 0; i < negative_cache_count; i++) {
+    if (negative_cache[i] && strcmp(negative_cache[i], module_name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static void negative_cache_insert(const char *module_name) {
+  if (negative_cache_count >= NEGATIVE_CACHE_MAX)
+    return; // cache full — just let the lookup run the slow path
+  // Store a static copy (this is a process-lifetime cache)
+  char *copy = malloc(strlen(module_name) + 1);
+  if (copy) {
+    strcpy(copy, module_name);
+    negative_cache[negative_cache_count++] = copy;
+  }
+}
+
+// Call this when a new file is opened/saved so we re-probe for newly created
+// modules that were previously not found.
+void lsp_negative_cache_clear(void) {
+  for (size_t i = 0; i < negative_cache_count; i++) {
+    free((void *)negative_cache[i]);
+    negative_cache[i] = NULL;
+  }
+  negative_cache_count = 0;
+}
+
 const char *lookup_module(LSPServer *server, const char *module_name) {
-  // First check workspace registry
+  if (!module_name)
+    return NULL;
+
+  // 1. Check workspace registry (always fast — in-memory)
   for (size_t i = 0; i < server->module_registry.count; i++) {
-    if (strcmp(server->module_registry.entries[i].module_name, module_name) ==
-        0) {
+    if (strcmp(server->module_registry.entries[i].module_name, module_name) == 0)
       return server->module_registry.entries[i].file_uri;
-    }
   }
 
-  // If not found, check standard library
-  ArenaAllocator temp_arena;
-  arena_allocator_init(&temp_arena, 4096);
+  // 2. Check negative cache before doing any filesystem I/O
+  if (negative_cache_contains(module_name)) {
+    fprintf(stderr, "[LSP] Module '%s' in negative cache, skipping probe\n",
+            module_name);
+    return NULL;
+  }
 
-  // Build path to std lib module
+  // 3. Check whether the std lib directory even exists before probing it.
+  //    Cache the result of this check so we only stat() once per process.
+  static int std_lib_exists = -1; // -1 = unknown, 0 = no, 1 = yes
+  if (std_lib_exists == -1) {
+    struct stat st;
+    std_lib_exists = (stat(LUMA_STD_PATH, &st) == 0 && S_ISDIR(st.st_mode))
+                     ? 1 : 0;
+    fprintf(stderr, "[LSP] Std lib path '%s': %s\n", LUMA_STD_PATH,
+            std_lib_exists ? "found" : "not found (will skip probes)");
+  }
+
+  if (!std_lib_exists) {
+    negative_cache_insert(module_name);
+    return NULL;
+  }
+
+  // 4. Probe the std lib filesystem
   size_t path_len = strlen(LUMA_STD_PATH) + strlen(module_name) + 10;
-  char *std_path = arena_alloc(&temp_arena, path_len, 1);
+  char *std_path = malloc(path_len);
+  if (!std_path)
+    return NULL;
+
   snprintf(std_path, path_len, "%s/%s.lx", LUMA_STD_PATH, module_name);
 
-  // Check if file exists
   FILE *test = fopen(std_path, "r");
   if (test) {
     fclose(test);
     const char *uri = lsp_path_to_uri(std_path, server->arena);
-    arena_destroy(&temp_arena);
-
-    fprintf(stderr, "[LSP] Found module '%s' in std lib: %s\n", module_name,
-            uri);
+    free(std_path);
+    fprintf(stderr, "[LSP] Found module '%s' in std lib: %s\n", module_name, uri);
     return uri;
   }
 
-  arena_destroy(&temp_arena);
+  free(std_path);
 
-  fprintf(stderr, "[LSP] Module '%s' not found in workspace or std lib\n",
-          module_name);
+  // Not found anywhere — add to negative cache
+  negative_cache_insert(module_name);
+  fprintf(stderr, "[LSP] Module '%s' not found, cached as negative\n", module_name);
   return NULL;
 }
 

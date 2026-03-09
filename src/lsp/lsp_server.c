@@ -4,111 +4,280 @@
  */
 
 #include "lsp.h"
-#include <dirent.h> // For Unix
+#include <dirent.h>
+#include <errno.h>
+#include <execinfo.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+// ---------------------------------------------------------------------------
+// Crash handler
+// ---------------------------------------------------------------------------
+static void crash_handler(int sig) {
+  const char *name = "UNKNOWN";
+  switch (sig) {
+  case SIGSEGV: name = "SIGSEGV (segfault)";     break;
+  case SIGABRT: name = "SIGABRT (abort/assert)";  break;
+  case SIGBUS:  name = "SIGBUS (bus error)";       break;
+  case SIGFPE:  name = "SIGFPE (float exception)"; break;
+  case SIGILL:  name = "SIGILL (illegal instr)";   break;
+  }
+  fprintf(stderr, "\n[LSP] *** CRASH: signal %d (%s) ***\n", sig, name);
+  void *frames[64];
+  int n = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, n, fileno(stderr));
+  fflush(stderr);
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+static void install_crash_handlers(void) {
+  signal(SIGSEGV, crash_handler);
+  signal(SIGABRT, crash_handler);
+  signal(SIGBUS,  crash_handler);
+  signal(SIGFPE,  crash_handler);
+  signal(SIGILL,  crash_handler);
+}
+
+// ---------------------------------------------------------------------------
+// Watchdog: if lsp_handle_message takes longer than WATCHDOG_SECS seconds,
+// log the hang and kill the process so VS Code can restart it cleanly
+// rather than timing out silently.
+// ---------------------------------------------------------------------------
+#define WATCHDOG_SECS 10
+
+typedef struct {
+  pthread_t        thread;
+  volatile int     active;   // 1 = watchdog is armed
+  volatile int     done;     // 1 = main thread wants watchdog to exit
+  pthread_mutex_t  mu;
+  pthread_cond_t   cv;
+} Watchdog;
+
+static Watchdog g_watchdog;
+
+static void *watchdog_thread(void *arg) {
+  (void)arg;
+  pthread_mutex_lock(&g_watchdog.mu);
+  while (!g_watchdog.done) {
+    if (g_watchdog.active) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_sec += WATCHDOG_SECS;
+
+      int rc = pthread_cond_timedwait(&g_watchdog.cv, &g_watchdog.mu, &ts);
+      if (rc == ETIMEDOUT && g_watchdog.active && !g_watchdog.done) {
+        fprintf(stderr,
+                "[LSP] *** WATCHDOG: message handler hung for >%d seconds ***\n"
+                "[LSP] This usually means the lexer/parser looped on partial input.\n"
+                "[LSP] Killing process so VS Code can restart the server.\n",
+                WATCHDOG_SECS);
+        fflush(stderr);
+        // Exit so VS Code restarts us; don't call abort() as that confuses
+        // the client into showing a different error.
+        _exit(1);
+      }
+    } else {
+      pthread_cond_wait(&g_watchdog.cv, &g_watchdog.mu);
+    }
+  }
+  pthread_mutex_unlock(&g_watchdog.mu);
+  return NULL;
+}
+
+static void watchdog_arm(void) {
+  pthread_mutex_lock(&g_watchdog.mu);
+  g_watchdog.active = 1;
+  pthread_cond_signal(&g_watchdog.cv);
+  pthread_mutex_unlock(&g_watchdog.mu);
+}
+
+static void watchdog_disarm(void) {
+  pthread_mutex_lock(&g_watchdog.mu);
+  g_watchdog.active = 0;
+  pthread_cond_signal(&g_watchdog.cv);
+  pthread_mutex_unlock(&g_watchdog.mu);
+}
+
+static void watchdog_init(void) {
+  pthread_mutex_init(&g_watchdog.mu, NULL);
+  pthread_cond_init(&g_watchdog.cv, NULL);
+  g_watchdog.active = 0;
+  g_watchdog.done   = 0;
+  pthread_create(&g_watchdog.thread, NULL, watchdog_thread, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// URI helpers
+// ---------------------------------------------------------------------------
 
 const char *lsp_uri_to_path(const char *uri, ArenaAllocator *arena) {
   if (!uri)
     return NULL;
-
   if (strncmp(uri, "file://", 7) == 0) {
     const char *path = uri + 7;
 #ifdef _WIN32
-    if (path[0] == '/' && path[2] == ':') {
+    if (path[0] == '/' && path[2] == ':')
       path++;
-    }
 #endif
     return arena_strdup(arena, path);
   }
-
   return arena_strdup(arena, uri);
 }
 
 const char *lsp_path_to_uri(const char *path, ArenaAllocator *arena) {
   if (!path)
     return NULL;
-
-  size_t len = strlen(path) + 8;
+  size_t len = strlen(path) + 10;
   char *uri = arena_alloc(arena, len, 1);
-
+  if (!uri)
+    return NULL;
 #ifdef _WIN32
   snprintf(uri, len, "file:///%s", path);
 #else
   snprintf(uri, len, "file://%s", path);
 #endif
-
   return uri;
 }
+
+// ---------------------------------------------------------------------------
+// Server init
+// ---------------------------------------------------------------------------
 
 bool lsp_server_init(LSPServer *server, ArenaAllocator *arena) {
   if (!server || !arena)
     return false;
 
+  install_crash_handlers();
+  watchdog_init();
+
   server->arena = arena;
   server->initialized = false;
   server->client_process_id = -1;
   server->document_count = 0;
-  server->document_capacity = 16;
+  server->document_capacity = 64;
 
   server->documents =
       arena_alloc(arena, server->document_capacity * sizeof(LSPDocument *),
                   alignof(LSPDocument *));
 
-  // Initialize module registry
   server->module_registry.entries = NULL;
-  server->module_registry.count = 0;
+  server->module_registry.count   = 0;
   server->module_registry.capacity = 0;
 
   return server->documents != NULL;
 }
+
+// ---------------------------------------------------------------------------
+// Main server loop
+// ---------------------------------------------------------------------------
 
 void lsp_server_run(LSPServer *server) {
   if (!server)
     return;
 
   fprintf(stderr, "[LSP] Server started, waiting for messages...\n");
+  fflush(stderr);
 
-  char buffer[65536];
+  char header_buf[256];
 
   while (1) {
-    // Read Content-Length header
-    if (!fgets(buffer, sizeof(buffer), stdin)) {
+    if (!fgets(header_buf, sizeof(header_buf), stdin)) {
+      fprintf(stderr, "[LSP] stdin closed, exiting\n");
       break;
     }
 
-    if (strncmp(buffer, "Content-Length:", 15) != 0) {
+    if (strncmp(header_buf, "Content-Length:", 15) != 0)
+      continue;
+
+    int content_length = atoi(header_buf + 15);
+
+    if (content_length <= 0) {
+      fprintf(stderr, "[LSP] Invalid content_length: %d, skipping\n",
+              content_length);
+      continue;
+    }
+    if (content_length > 10 * 1024 * 1024) {
+      fprintf(stderr, "[LSP] content_length %d exceeds 10MB cap, skipping\n",
+              content_length);
       continue;
     }
 
-    int content_length = atoi(buffer + 15);
     fprintf(stderr, "[LSP] Content-Length: %d\n", content_length);
 
-    // Skip empty line
-    fgets(buffer, sizeof(buffer), stdin);
-
-    // Read message
-    if (content_length > 0 && content_length < (int)sizeof(buffer)) {
-      size_t read = fread(buffer, 1, content_length, stdin);
-      buffer[read] = '\0';
-
-      lsp_handle_message(server, buffer);
+    while (fgets(header_buf, sizeof(header_buf), stdin)) {
+      if (strcmp(header_buf, "\r\n") == 0 || strcmp(header_buf, "\n") == 0)
+        break;
     }
+
+    char *message = (char *)malloc(content_length + 1);
+    if (!message) {
+      fprintf(stderr, "[LSP] Failed to allocate %d bytes, exiting\n",
+              content_length);
+      break;
+    }
+
+    size_t total_read = 0;
+    while (total_read < (size_t)content_length) {
+      size_t n = fread(message + total_read, 1,
+                       (size_t)content_length - total_read, stdin);
+      if (n == 0) {
+        if (feof(stdin) || ferror(stdin)) {
+          fprintf(stderr, "[LSP] stdin EOF/error after %zu/%d bytes\n",
+                  total_read, content_length);
+          free(message);
+          goto done;
+        }
+        break;
+      }
+      total_read += n;
+    }
+
+    if (total_read != (size_t)content_length) {
+      fprintf(stderr, "[LSP] Truncated: expected %d, got %zu — skipping\n",
+              content_length, total_read);
+      free(message);
+      continue;
+    }
+
+    message[total_read] = '\0';
+
+    fprintf(stderr, "[LSP] Dispatching (%zu bytes)\n", total_read);
+    fflush(stderr);
+
+    watchdog_arm();
+    lsp_handle_message(server, message);
+    watchdog_disarm();
+
+    free(message);
+
+    fprintf(stderr, "[LSP] Message handled OK\n");
+    fflush(stderr);
   }
+
+done:
+  fprintf(stderr, "[LSP] Server loop exited\n");
+  fflush(stderr);
 }
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
 
 void lsp_server_shutdown(LSPServer *server) {
   if (!server)
     return;
 
-  // Clean up all documents
   for (size_t i = 0; i < server->document_count; i++) {
-    if (server->documents[i]->arena) {
+    if (server->documents[i] && server->documents[i]->arena)
       arena_destroy(server->documents[i]->arena);
-    }
   }
 
   server->initialized = false;
