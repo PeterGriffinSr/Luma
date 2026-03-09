@@ -5,11 +5,47 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include "lsp.h"
 
-#define LUMA_STD_PATH "/usr/local/lib/luma/std"
+#define LUMA_STD_PATH "/usr/local/lib/luma"
+
+// ---------------------------------------------------------------------------
+// Negative cache: module names already known to not exist anywhere.
+// Avoids repeated fopen() probes on every keystroke.
+// ---------------------------------------------------------------------------
+#define NEGATIVE_CACHE_MAX 64
+static const char *negative_cache[NEGATIVE_CACHE_MAX];
+static size_t      negative_cache_count = 0;
+
+static int negative_cache_contains(const char *module_name) {
+  for (size_t i = 0; i < negative_cache_count; i++) {
+    if (negative_cache[i] && strcmp(negative_cache[i], module_name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static void negative_cache_insert(const char *module_name) {
+  if (negative_cache_count >= NEGATIVE_CACHE_MAX)
+    return;
+  char *copy = malloc(strlen(module_name) + 1);
+  if (copy) {
+    strcpy(copy, module_name);
+    negative_cache[negative_cache_count++] = copy;
+  }
+}
+
+void lsp_negative_cache_clear(void) {
+  for (size_t i = 0; i < negative_cache_count; i++) {
+    free((void *)negative_cache[i]);
+    negative_cache[i] = NULL;
+  }
+  negative_cache_count = 0;
+}
+
 
 // Extract @module declaration from file content
 const char *extract_module_name(const char *content, ArenaAllocator *arena) {
@@ -18,16 +54,12 @@ const char *extract_module_name(const char *content, ArenaAllocator *arena) {
 
   const char *src = content;
 
-  // Look for @module directive (usually at the top)
   while (*src) {
-    // Skip whitespace and comments
     while (*src && (isspace(*src) || *src == '/' || *src == '#')) {
       if (*src == '/' && *(src + 1) == '/') {
-        // Skip line comment
         while (*src && *src != '\n')
           src++;
       } else if (*src == '/' && *(src + 1) == '*') {
-        // Skip block comment
         src += 2;
         while (*src && !(*src == '*' && *(src + 1) == '/'))
           src++;
@@ -38,15 +70,12 @@ const char *extract_module_name(const char *content, ArenaAllocator *arena) {
       }
     }
 
-    // Check for @module
     if (strncmp(src, "@module", 7) == 0) {
       src += 7;
 
-      // Skip whitespace
       while (*src && isspace(*src))
         src++;
 
-      // Extract module name in quotes
       if (*src == '"') {
         src++;
         const char *name_start = src;
@@ -62,7 +91,6 @@ const char *extract_module_name(const char *content, ArenaAllocator *arena) {
       }
     }
 
-    // If we hit a non-whitespace, non-comment, non-@module token, stop looking
     if (*src && !isspace(*src) && *src != '@') {
       break;
     }
@@ -74,7 +102,6 @@ const char *extract_module_name(const char *content, ArenaAllocator *arena) {
   return NULL;
 }
 
-// Scan a single file and register its module
 void scan_file_for_module(LSPServer *server, const char *file_uri,
                           ArenaAllocator *temp_arena) {
   const char *file_path = lsp_uri_to_path(file_uri, temp_arena);
@@ -85,7 +112,6 @@ void scan_file_for_module(LSPServer *server, const char *file_uri,
   if (!f)
     return;
 
-  // Read first 1KB to check for @module (should be at the top)
   char buffer[1024];
   size_t read = fread(buffer, 1, sizeof(buffer) - 1, f);
   buffer[read] = '\0';
@@ -95,20 +121,15 @@ void scan_file_for_module(LSPServer *server, const char *file_uri,
   if (!module_name)
     return;
 
-  // Check if already registered
   for (size_t i = 0; i < server->module_registry.count; i++) {
-    if (strcmp(server->module_registry.entries[i].module_name, module_name) ==
-        0) {
-      // Already registered, update URI
+    if (strcmp(server->module_registry.entries[i].module_name, module_name) == 0) {
       server->module_registry.entries[i].file_uri =
           arena_strdup(server->arena, file_uri);
       return;
     }
   }
 
-  // Add new entry
   if (server->module_registry.count >= server->module_registry.capacity) {
-    // Grow registry
     size_t new_capacity = server->module_registry.capacity * 2;
     if (new_capacity == 0)
       new_capacity = 32;
@@ -132,7 +153,6 @@ void scan_file_for_module(LSPServer *server, const char *file_uri,
   entry->file_uri = arena_strdup(server->arena, file_uri);
 }
 
-// Recursively scan directory for .lx files
 void scan_directory_recursive(LSPServer *server, const char *dir_path,
                               ArenaAllocator *temp_arena) {
 #ifdef _WIN32
@@ -157,7 +177,6 @@ void scan_directory_recursive(LSPServer *server, const char *dir_path,
     if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
       scan_directory_recursive(server, full_path, temp_arena);
     } else {
-      // Check if .lx file
       const char *ext = strrchr(find_data.cFileName, '.');
       if (ext && strcmp(ext, ".lx") == 0) {
         const char *uri = lsp_path_to_uri(full_path, temp_arena);
@@ -170,7 +189,6 @@ void scan_directory_recursive(LSPServer *server, const char *dir_path,
 
   FindClose(hFind);
 #else
-  // Unix/Linux implementation
   DIR *dir = opendir(dir_path);
   if (!dir)
     return;
@@ -189,7 +207,6 @@ void scan_directory_recursive(LSPServer *server, const char *dir_path,
       if (S_ISDIR(st.st_mode)) {
         scan_directory_recursive(server, full_path, temp_arena);
       } else if (S_ISREG(st.st_mode)) {
-        // Check if .lx file
         const char *ext = strrchr(entry->d_name, '.');
         if (ext && strcmp(ext, ".lx") == 0) {
           const char *uri = lsp_path_to_uri(full_path, temp_arena);
@@ -205,7 +222,6 @@ void scan_directory_recursive(LSPServer *server, const char *dir_path,
 #endif
 }
 
-// Build module registry by scanning workspace
 void build_module_registry(LSPServer *server, const char *workspace_uri) {
   ArenaAllocator temp_arena;
   arena_allocator_init(&temp_arena, 64 * 1024);
@@ -220,68 +236,27 @@ void build_module_registry(LSPServer *server, const char *workspace_uri) {
   arena_destroy(&temp_arena);
 }
 
-// ---------------------------------------------------------------------------
-// Negative cache: module names we already know don't exist anywhere.
-// Avoids repeated fopen() probes on every keystroke — especially important
-// on WSL where cross-boundary filesystem calls are slow (50-200ms each).
-// ---------------------------------------------------------------------------
-#define NEGATIVE_CACHE_MAX 64
-static const char *negative_cache[NEGATIVE_CACHE_MAX];
-static size_t      negative_cache_count = 0;
-
-static int negative_cache_contains(const char *module_name) {
-  for (size_t i = 0; i < negative_cache_count; i++) {
-    if (negative_cache[i] && strcmp(negative_cache[i], module_name) == 0)
-      return 1;
-  }
-  return 0;
-}
-
-static void negative_cache_insert(const char *module_name) {
-  if (negative_cache_count >= NEGATIVE_CACHE_MAX)
-    return; // cache full — just let the lookup run the slow path
-  // Store a static copy (this is a process-lifetime cache)
-  char *copy = malloc(strlen(module_name) + 1);
-  if (copy) {
-    strcpy(copy, module_name);
-    negative_cache[negative_cache_count++] = copy;
-  }
-}
-
-// Call this when a new file is opened/saved so we re-probe for newly created
-// modules that were previously not found.
-void lsp_negative_cache_clear(void) {
-  for (size_t i = 0; i < negative_cache_count; i++) {
-    free((void *)negative_cache[i]);
-    negative_cache[i] = NULL;
-  }
-  negative_cache_count = 0;
-}
-
 const char *lookup_module(LSPServer *server, const char *module_name) {
-  if (!module_name)
-    return NULL;
+  if (!module_name) return NULL;
 
-  // 1. Check workspace registry (always fast — in-memory)
+  // 1. Workspace registry (always in-memory, fast)
   for (size_t i = 0; i < server->module_registry.count; i++) {
     if (strcmp(server->module_registry.entries[i].module_name, module_name) == 0)
       return server->module_registry.entries[i].file_uri;
   }
 
-  // 2. Check negative cache before doing any filesystem I/O
+  // 2. Negative cache — skip filesystem probe for known-missing modules
   if (negative_cache_contains(module_name)) {
     fprintf(stderr, "[LSP] Module '%s' in negative cache, skipping probe\n",
             module_name);
     return NULL;
   }
 
-  // 3. Check whether the std lib directory even exists before probing it.
-  //    Cache the result of this check so we only stat() once per process.
-  static int std_lib_exists = -1; // -1 = unknown, 0 = no, 1 = yes
+  // 3. One-time check whether the std lib directory exists at all
+  static int std_lib_exists = -1;
   if (std_lib_exists == -1) {
     struct stat st;
-    std_lib_exists = (stat(LUMA_STD_PATH, &st) == 0 && S_ISDIR(st.st_mode))
-                     ? 1 : 0;
+    std_lib_exists = (stat(LUMA_STD_PATH, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
     fprintf(stderr, "[LSP] Std lib path '%s': %s\n", LUMA_STD_PATH,
             std_lib_exists ? "found" : "not found (will skip probes)");
   }
@@ -291,32 +266,73 @@ const char *lookup_module(LSPServer *server, const char *module_name) {
     return NULL;
   }
 
-  // 4. Probe the std lib filesystem
-  size_t path_len = strlen(LUMA_STD_PATH) + strlen(module_name) + 10;
-  char *std_path = malloc(path_len);
-  if (!std_path)
-    return NULL;
+  // 4. Probe std lib filesystem.
+  //
+  //    Luma stdlib modules use the naming convention:
+  //      module name  ->  directory/filename.lx
+  //    where the first '_'-delimited segment is the subdirectory and the
+  //    remainder is the filename.  Examples:
+  //      std_string  ->  std/string.lx
+  //      std_vector  ->  std/vector.lx
+  //      std_io      ->  std/io.lx
+  //      std_memory  ->  std/memory.lx
+  //      std_args    ->  std/args.lx
+  //
+  //    We try the subdir/file pattern first, then fall back to a flat probe
+  //    (module_name.lx) for any modules that don't follow the convention.
 
-  snprintf(std_path, path_len, "%s/%s.lx", LUMA_STD_PATH, module_name);
+  // Pattern (a): split on first '_' -> subdir/filename.lx
+  const char *underscore = strchr(module_name, '_');
+  if (underscore) {
+    size_t dir_len       = (size_t)(underscore - module_name);
+    const char *filename = underscore + 1;
 
-  FILE *test = fopen(std_path, "r");
-  if (test) {
-    fclose(test);
-    const char *uri = lsp_path_to_uri(std_path, server->arena);
-    free(std_path);
-    fprintf(stderr, "[LSP] Found module '%s' in std lib: %s\n", module_name, uri);
-    return uri;
+    size_t path_len = strlen(LUMA_STD_PATH) + dir_len + strlen(filename) + 8;
+    char *std_path = malloc(path_len);
+    if (std_path) {
+      snprintf(std_path, path_len, "%s/%.*s/%s.lx",
+               LUMA_STD_PATH, (int)dir_len, module_name, filename);
+
+      FILE *test = fopen(std_path, "r");
+      if (test) {
+        fclose(test);
+        const char *uri = lsp_path_to_uri(std_path, server->arena);
+        free(std_path);
+        fprintf(stderr, "[LSP] Found module '%s' in std lib: %s\n",
+                module_name, uri);
+        return uri;
+      }
+      free(std_path);
+    }
   }
 
-  free(std_path);
+  // Pattern (b): flat — LUMA_STD_PATH/module_name.lx
+  {
+    size_t path_len = strlen(LUMA_STD_PATH) + strlen(module_name) + 10;
+    char *std_path = malloc(path_len);
+    if (std_path) {
+      snprintf(std_path, path_len, "%s/%s.lx", LUMA_STD_PATH, module_name);
 
-  // Not found anywhere — add to negative cache
+      FILE *test = fopen(std_path, "r");
+      if (test) {
+        fclose(test);
+        const char *uri = lsp_path_to_uri(std_path, server->arena);
+        free(std_path);
+        fprintf(stderr, "[LSP] Found module '%s' in std lib (flat): %s\n",
+                module_name, uri);
+        return uri;
+      }
+      free(std_path);
+    }
+  }
+
   negative_cache_insert(module_name);
-  fprintf(stderr, "[LSP] Module '%s' not found, cached as negative\n", module_name);
+  fprintf(stderr, "[LSP] Module '%s' not found, cached as negative\n",
+          module_name);
   return NULL;
 }
 
-// Extract @use declarations from source code
+// Extract @use declarations from source code.
 void extract_imports(LSPDocument *doc, ArenaAllocator *arena) {
   if (!doc || !doc->content)
     return;
@@ -325,43 +341,71 @@ void extract_imports(LSPDocument *doc, ArenaAllocator *arena) {
   growable_array_init(&imports, arena, 4, sizeof(ImportedModule));
 
   const char *src = doc->content;
+  int brace_depth = 0;
+
   while (*src) {
-    // Find @use directive
-    if (strncmp(src, "@use", 4) == 0) {
-      src += 4;
+    if (*src == '{') {
+      brace_depth++;
+      if (brace_depth >= 1) break;
+    }
+    if (*src == '}') {
+      if (brace_depth > 0) brace_depth--;
+    }
 
-      // Skip whitespace
-      while (*src && isspace(*src))
+    if (*src == '/' && *(src + 1) == '/') {
+      while (*src && *src != '\n') src++;
+      continue;
+    }
+
+    if (*src == '/' && *(src + 1) == '*') {
+      src += 2;
+      while (*src && !(*src == '*' && *(src + 1) == '/')) src++;
+      if (*src) src += 2;
+      continue;
+    }
+
+    if (*src == '"') {
+      src++;
+      while (*src && *src != '"') {
+        if (*src == '\\') src++;
+        if (*src) src++;
+      }
+      if (*src == '"') src++;
+      continue;
+    }
+
+    if (*src == '@' && strncmp(src, "@use", 4) == 0) {
+      const char *after = src + 4;
+      if (!isspace((unsigned char)*after) && *after != '\0') {
         src++;
+        continue;
+      }
 
-      // Extract module path in quotes
+      src += 4;
+      while (*src && isspace((unsigned char)*src)) src++;
+
       if (*src == '"') {
         src++;
         const char *path_start = src;
-        while (*src && *src != '"')
-          src++;
+        while (*src && *src != '"') src++;
 
         size_t path_len = src - path_start;
         char *module_path = arena_alloc(arena, path_len + 1, 1);
         memcpy(module_path, path_start, path_len);
         module_path[path_len] = '\0';
 
-        if (*src == '"')
-          src++;
+        if (*src == '"') src++;
 
-        // Skip whitespace and look for "as"
-        while (*src && isspace(*src))
-          src++;
+        while (*src && isspace((unsigned char)*src)) src++;
 
         const char *alias = NULL;
-        if (strncmp(src, "as", 2) == 0) {
+        if (strncmp(src, "as", 2) == 0 &&
+            !isalnum((unsigned char)src[2]) && src[2] != '_') {
           src += 2;
-          while (*src && isspace(*src))
-            src++;
+          while (*src && isspace((unsigned char)*src)) src++;
 
-          // Extract alias identifier
           const char *alias_start = src;
-          while (*src && (isalnum(*src) || *src == '_'))
+          while (*src && (isalnum((unsigned char)*src) || *src == '_'))
             src++;
 
           size_t alias_len = src - alias_start;
@@ -375,36 +419,34 @@ void extract_imports(LSPDocument *doc, ArenaAllocator *arena) {
             (ImportedModule *)growable_array_push(&imports);
         if (import) {
           import->module_path = module_path;
-          import->alias = alias;
-          import->scope = NULL; // Will be resolved later
+          import->alias       = alias;
+          import->scope       = NULL;
         }
       }
+      continue;
     }
+
     src++;
   }
 
-  doc->imports = (ImportedModule *)imports.data;
+  doc->imports      = (ImportedModule *)imports.data;
   doc->import_count = imports.count;
 }
 
-// Resolve module path relative to current document
 const char *resolve_module_path(const char *current_uri,
                                 const char *module_path,
                                 ArenaAllocator *arena) {
-  // Convert URI to path
   const char *current_path = lsp_uri_to_path(current_uri, arena);
   if (!current_path)
     return NULL;
 
-  // Find directory of current file
   const char *last_slash = strrchr(current_path, '/');
   if (!last_slash)
     last_slash = strrchr(current_path, '\\');
 
   size_t dir_len = last_slash ? (last_slash - current_path + 1) : 0;
 
-  // Build full path
-  size_t total_len = dir_len + strlen(module_path) + 4; // +4 for ".lx"
+  size_t total_len = dir_len + strlen(module_path) + 4;
   char *full_path = arena_alloc(arena, total_len, 1);
 
   if (dir_len > 0) {
@@ -412,7 +454,6 @@ const char *resolve_module_path(const char *current_uri,
   }
   strcpy(full_path + dir_len, module_path);
 
-  // Add .lx extension if not present
   if (!strstr(module_path, ".lx")) {
     strcat(full_path, ".lx");
   }
@@ -420,65 +461,134 @@ const char *resolve_module_path(const char *current_uri,
   return lsp_path_to_uri(full_path, arena);
 }
 
-// Update parse_imported_module to return the parsed module AST, not just scope
+// ---------------------------------------------------------------------------
+// Module AST cache helpers
+// ---------------------------------------------------------------------------
+
+void lsp_ast_cache_init(LSPServer *server) {
+  memset(server->ast_cache, 0, sizeof(server->ast_cache));
+  server->ast_cache_count = 0;
+  arena_allocator_init(&server->cache_arena, 4 * 1024 * 1024);
+}
+
+void lsp_ast_cache_invalidate(LSPServer *server, const char *uri) {
+  for (size_t i = 0; i < server->ast_cache_count; i++) {
+    if (server->ast_cache[i].uri &&
+        strcmp(server->ast_cache[i].uri, uri) == 0) {
+      server->ast_cache[i].ast   = NULL;
+      server->ast_cache[i].mtime = 0;
+      fprintf(stderr, "[LSP] Cache: invalidated %s\n", uri);
+      return;
+    }
+  }
+}
+
+static AstNode *cache_lookup(LSPServer *server, const char *uri, long mtime) {
+  for (size_t i = 0; i < server->ast_cache_count; i++) {
+    ModuleASTCacheEntry *e = &server->ast_cache[i];
+    if (e->uri && strcmp(e->uri, uri) == 0) {
+      if (e->ast && e->mtime == mtime) {
+        return e->ast;
+      }
+      return NULL;
+    }
+  }
+  return NULL;
+}
+
+static void cache_store(LSPServer *server, const char *uri,
+                        AstNode *ast, long mtime) {
+  for (size_t i = 0; i < server->ast_cache_count; i++) {
+    ModuleASTCacheEntry *e = &server->ast_cache[i];
+    if (e->uri && strcmp(e->uri, uri) == 0) {
+      e->ast   = ast;
+      e->mtime = mtime;
+      return;
+    }
+  }
+  if (server->ast_cache_count < MODULE_AST_CACHE_MAX) {
+    ModuleASTCacheEntry *e = &server->ast_cache[server->ast_cache_count++];
+    e->uri   = arena_strdup(&server->cache_arena, uri);
+    e->ast   = ast;
+    e->mtime = mtime;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// parse_imported_module_ast — with mtime-based caching
+// ---------------------------------------------------------------------------
 AstNode *parse_imported_module_ast(LSPServer *server, const char *module_uri,
                                    BuildConfig *config, ArenaAllocator *arena) {
-  // Check if already opened
+  // 1. If the file is already open in the editor, use its AST directly.
   LSPDocument *module_doc = lsp_document_find(server, module_uri);
   if (module_doc && module_doc->ast) {
+    fprintf(stderr, "[LSP] Cache: open doc hit for %s\n", module_uri);
     return module_doc->ast;
   }
 
-  // Try to read file from disk
   const char *file_path = lsp_uri_to_path(module_uri, arena);
   if (!file_path)
     return NULL;
 
-  FILE *f = fopen(file_path, "r");
-  if (!f) {
-    return NULL;
+  // 2. Stat to get mtime.
+  struct stat st;
+  long mtime = 0;
+  if (stat(file_path, &st) == 0) {
+    mtime = (long)st.st_mtime;
   }
+
+  // 3. Cache lookup.
+  AstNode *cached = cache_lookup(server, module_uri, mtime);
+  if (cached) {
+    fprintf(stderr, "[LSP] Cache: AST hit for %s\n", module_uri);
+    return cached;
+  }
+
+  fprintf(stderr, "[LSP] Cache: parsing %s (mtime=%ld)\n", module_uri, (long)mtime);
+
+  // 4. Read, lex, parse.
+  FILE *f = fopen(file_path, "r");
+  if (!f)
+    return NULL;
 
   fseek(f, 0, SEEK_END);
   long size = ftell(f);
   fseek(f, 0, SEEK_SET);
 
-  char *content = arena_alloc(arena, size + 1, 1);
-  fread(content, 1, size, f);
-  content[size] = '\0';
+  char *file_content = arena_alloc(&server->cache_arena, size + 1, 1);
+  if (!file_content) { fclose(f); return NULL; }
+  fread(file_content, 1, size, f);
+  file_content[size] = '\0';
   fclose(f);
 
-  // Lex the module
   Lexer lexer;
-  init_lexer(&lexer, content, arena);
+  init_lexer(&lexer, file_content, &server->cache_arena);
 
   GrowableArray tokens;
-  growable_array_init(&tokens, arena, 256, sizeof(Token));
+  growable_array_init(&tokens, &server->cache_arena, 256, sizeof(Token));
 
   Token token;
   while ((token = next_token(&lexer)).type_ != TOK_EOF) {
     Token *slot = (Token *)growable_array_push(&tokens);
-    if (slot)
-      *slot = token;
+    if (slot) *slot = token;
   }
 
-  // Parse the module
-  AstNode *module_ast = parse(&tokens, arena, config);
-
-  if (!module_ast) {
+  AstNode *module_ast = parse(&tokens, &server->cache_arena, config);
+  if (!module_ast)
     return NULL;
-  }
 
-  // Extract the first module from the program if it's a program node
+  AstNode *result = module_ast;
   if (module_ast->type == AST_PROGRAM &&
       module_ast->stmt.program.module_count > 0) {
-    return module_ast->stmt.program.modules[0];
+    result = module_ast->stmt.program.modules[0];
   }
 
-  return module_ast;
+  // 5. Store in cache.
+  cache_store(server, module_uri, result, mtime);
+
+  return result;
 }
 
-// Update resolve_imports to store module scopes from the typechecker
 void resolve_imports(LSPServer *server, LSPDocument *doc, BuildConfig *config,
                      GrowableArray *imported_modules) {
   if (!doc || !doc->imports || doc->import_count == 0)
@@ -487,19 +597,16 @@ void resolve_imports(LSPServer *server, LSPDocument *doc, BuildConfig *config,
   for (size_t i = 0; i < doc->import_count; i++) {
     ImportedModule *import = &doc->imports[i];
 
-    // Look up module in registry by name
     const char *resolved_uri = lookup_module(server, import->module_path);
 
     if (!resolved_uri) {
       continue;
     }
 
-    // Parse module and get its AST
     AstNode *module_ast =
         parse_imported_module_ast(server, resolved_uri, config, doc->arena);
 
     if (module_ast) {
-      // Add to the list of modules
       AstNode **slot = (AstNode **)growable_array_push(imported_modules);
       if (slot) {
         *slot = module_ast;

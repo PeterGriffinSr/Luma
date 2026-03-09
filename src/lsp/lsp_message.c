@@ -1,323 +1,319 @@
-#include <stdlib.h>
 #include "lsp.h"
 
 // ---------------------------------------------------------------------------
-// Helper: serialize diagnostics to a heap-allocated string.
-// Caller must free() the returned pointer.
+// Debounce state — track last didChange time so we only typecheck after the
+// user has stopped typing for DEBOUNCE_MS milliseconds, or on save.
 // ---------------------------------------------------------------------------
-static char *build_diagnostics_params(const char *uri,
-                                      LSPDiagnostic *diagnostics,
-                                      size_t diag_count) {
-  size_t buf_size = 512 + diag_count * 1024;
-  char *params = (char *)malloc(buf_size);
-  if (!params)
-    return NULL;
-  serialize_diagnostics_to_json(uri, diagnostics, diag_count,
-                                params, buf_size);
-  return params;
+#include <time.h>
+
+#define DEBOUNCE_MS 500
+
+static struct timespec g_last_change = {0, 0};
+static bool            g_pending_analysis = false;
+
+static long ms_since(struct timespec *t) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (now.tv_sec - t->tv_sec) * 1000 +
+         (now.tv_nsec - t->tv_nsec) / 1000000;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: run analysis on a document and publish diagnostics.
-// Uses its own arena so it never touches the caller's temp_arena.
-// ---------------------------------------------------------------------------
+// Run analysis + publish diagnostics for a document.
+// Called either immediately (on save/open) or after debounce (on change).
 static void analyze_and_publish(LSPServer *server, LSPDocument *doc,
-                                const char *uri) {
+                                 const char *uri, ArenaAllocator *arena) {
   BuildConfig config = {0};
   config.check_mem = true;
   lsp_document_analyze(doc, server, &config);
 
-  ArenaAllocator diag_arena;
-  arena_allocator_init(&diag_arena, 64 * 1024);
+  size_t diag_count;
+  LSPDiagnostic *diagnostics = lsp_diagnostics(doc, &diag_count, arena);
 
-  size_t diag_count = 0;
-  LSPDiagnostic *diagnostics = lsp_diagnostics(doc, &diag_count, &diag_arena);
-
-  fprintf(stderr, "[LSP] Sending %zu diagnostics\n", diag_count);
-
-  char *params = build_diagnostics_params(uri, diagnostics, diag_count);
+  char *params = (char *)malloc(65536);
   if (params) {
+    serialize_diagnostics_to_json(uri, diagnostics, diag_count, params, 65536);
     lsp_send_notification("textDocument/publishDiagnostics", params);
     free(params);
   }
 
-  arena_destroy(&diag_arena);
+  g_pending_analysis = false;
 }
 
-// ---------------------------------------------------------------------------
-// Main message dispatcher
-// ---------------------------------------------------------------------------
+// Check if a pending debounced analysis is due and run it.
+// Called at the top of the message loop (from lsp_server_run) so we process
+// the debounced typecheck even when no new messages arrive.
+void lsp_check_pending_analysis(LSPServer *server) {
+  if (!g_pending_analysis)
+    return;
+  if (ms_since(&g_last_change) < DEBOUNCE_MS)
+    return;
+
+  // Find the document that needs re-analysis
+  for (size_t i = 0; i < server->document_count; i++) {
+    LSPDocument *doc = server->documents[i];
+    if (doc && doc->needs_reanalysis) {
+      ArenaAllocator temp;
+      arena_allocator_init(&temp, 64 * 1024);
+      fprintf(stderr, "[LSP] Debounce: running deferred analysis for %s\n", doc->uri);
+      analyze_and_publish(server, doc, doc->uri, &temp);
+      arena_destroy(&temp);
+    }
+  }
+}
+
 void lsp_handle_message(LSPServer *server, const char *message) {
   if (!server || !message)
     return;
 
-  fprintf(stderr, "[LSP] Received message: %.300s\n", message);
+  fprintf(stderr, "[LSP] Received message: %.500s...\n", message);
 
-  LSPMethod method     = lsp_parse_method(message);
-  int       request_id = extract_int(message, "id");
+  LSPMethod method = lsp_parse_method(message);
+  int request_id = extract_int(message, "id");
 
-  fprintf(stderr, "[LSP] method=%d request_id=%d\n", (int)method, request_id);
+  fprintf(stderr, "[LSP] Extracted request_id: %d\n", request_id);
 
-  // Small arena for string extraction only.
-  // All heavy allocations use their own dedicated arenas below.
   ArenaAllocator temp_arena;
-  arena_allocator_init(&temp_arena, 32 * 1024);
+  arena_allocator_init(&temp_arena, 64 * 1024);
 
   switch (method) {
-
-  // --------------------------------------------------------------------------
   case LSP_METHOD_INITIALIZE: {
     fprintf(stderr, "[LSP] Handling initialize\n");
 
-    if (request_id < 0) {
-      fprintf(stderr, "[LSP] ERROR: No valid request_id for initialize\n");
-      break;
+    if (request_id >= 0) {
+      const char *workspace_uri = extract_string(message, "uri", &temp_arena);
+      if (workspace_uri) {
+        build_module_registry(server, workspace_uri);
+      }
+
+      server->initialized = true;
+      const char *capabilities =
+          "{"
+          "\"capabilities\":{"
+          "\"textDocumentSync\":1,"
+          "\"hoverProvider\":true,"
+          "\"definitionProvider\":true,"
+          "\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},"
+          "\"documentSymbolProvider\":true"
+          "},"
+          "\"serverInfo\":{\"name\":\"Luma LSP\",\"version\":\"0.1.0\"}"
+          "}";
+      lsp_send_response(request_id, capabilities);
+    } else {
+      fprintf(stderr, "[LSP] ERROR: No valid request_id for initialize!\n");
     }
-
-    // rootUri may be JSON null — only extract when it is a real string
-    const char *raw_root = find_json_value(message, "rootUri");
-    if (raw_root && *raw_root == '"') {
-      const char *root_uri = extract_string(message, "rootUri", &temp_arena);
-      if (root_uri)
-        build_module_registry(server, root_uri);
-    }
-
-    server->initialized = true;
-
-    const char *capabilities =
-        "{"
-        "\"capabilities\":{"
-        "\"textDocumentSync\":1,"
-        "\"hoverProvider\":true,"
-        "\"definitionProvider\":true,"
-        "\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},"
-        "\"documentSymbolProvider\":true"
-        "},"
-        "\"serverInfo\":{\"name\":\"Luma LSP\",\"version\":\"0.1.0\"}"
-        "}";
-    lsp_send_response(request_id, capabilities);
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_INITIALIZED:
-    fprintf(stderr, "[LSP] Client initialized (notification)\n");
+    fprintf(stderr, "[LSP] Client initialized\n");
     break;
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_TEXT_DOCUMENT_DID_OPEN: {
     fprintf(stderr, "[LSP] Handling didOpen\n");
 
     const char *uri = extract_string(message, "uri", &temp_arena);
-    int version     = extract_int(message, "version");
+    const char *text = extract_string(message, "text", &temp_arena);
+    int version = extract_int(message, "version");
 
-    // "text" comes after "languageId" in the textDocument object.
-    const char *after_langid = find_json_value(message, "languageId");
-    const char *text = extract_string(
-        after_langid ? after_langid : message, "text", &temp_arena);
+    if (uri && text) {
+      fprintf(stderr, "[LSP] Opening document: %s (version %d)\n", uri, version);
+      fprintf(stderr, "[LSP] Document content length: %zu\n", strlen(text));
 
-    if (!uri)  { fprintf(stderr, "[LSP] didOpen: missing uri\n");  break; }
-    if (!text) { fprintf(stderr, "[LSP] didOpen: missing text\n"); break; }
+      lsp_ast_cache_invalidate(server, uri);
+      lsp_negative_cache_clear();
 
-    fprintf(stderr, "[LSP] Opening document: %s (version %d, %zu bytes)\n",
-            uri, version, strlen(text));
-
-    // Clear the module negative cache — the user may have just created a
-    // new .lx file that was previously not found.
-    lsp_negative_cache_clear();
-
-    LSPDocument *doc = lsp_document_open(server, uri, text, version);
-    if (doc)
-      analyze_and_publish(server, doc, uri);
+      LSPDocument *doc = lsp_document_open(server, uri, text, version);
+      if (doc) {
+        // Always analyze immediately on open
+        analyze_and_publish(server, doc, uri, &temp_arena);
+      }
+    }
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_TEXT_DOCUMENT_DID_CHANGE: {
     fprintf(stderr, "[LSP] Handling didChange\n");
 
     const char *uri = extract_string(message, "uri", &temp_arena);
-    int version     = extract_int(message, "version");
+    const char *text = extract_string(message, "text", &temp_arena);
+    int version = extract_int(message, "version");
 
-    // "text" lives inside contentChanges[0].
-    const char *changes_val = find_json_value(message, "contentChanges");
-    const char *text = extract_string(
-        changes_val ? changes_val : message, "text", &temp_arena);
+    if (uri && text) {
+      lsp_document_update(server, uri, text, version);
 
-    fprintf(stderr, "[LSP] didChange: uri=%s version=%d text_len=%zu\n",
-            uri ? uri : "NULL", version, text ? strlen(text) : 0);
+      // Mark as pending — debounced analysis will fire after DEBOUNCE_MS
+      clock_gettime(CLOCK_MONOTONIC, &g_last_change);
+      g_pending_analysis = true;
 
-    if (!uri)  { fprintf(stderr, "[LSP] didChange: missing uri\n");  break; }
-    if (!text) { fprintf(stderr, "[LSP] didChange: missing text\n"); break; }
-
-    lsp_document_update(server, uri, text, version);
-
-    LSPDocument *doc = lsp_document_find(server, uri);
-    if (doc)
-      analyze_and_publish(server, doc, uri);
+      fprintf(stderr, "[LSP] didChange: deferred analysis (debounce %dms)\n",
+              DEBOUNCE_MS);
+    }
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_TEXT_DOCUMENT_DID_CLOSE: {
     fprintf(stderr, "[LSP] Handling didClose\n");
     const char *uri = extract_string(message, "uri", &temp_arena);
-    if (uri)
+    if (uri) {
       lsp_document_close(server, uri);
+    }
     break;
   }
 
-  // --------------------------------------------------------------------------
+  // textDocument/didSave — treat as immediate re-analysis trigger
+  case LSP_METHOD_UNKNOWN: {
+    // Check if it's didSave (we don't have a dedicated enum value for it)
+    const char *method_val = extract_string(message, "method", &temp_arena);
+    if (method_val && strncmp(method_val, "textDocument/didSave", 20) == 0) {
+      fprintf(stderr, "[LSP] Handling didSave — triggering immediate analysis\n");
+      const char *uri = extract_string(message, "uri", &temp_arena);
+      if (uri) {
+        lsp_ast_cache_invalidate(server, uri);
+        lsp_negative_cache_clear();
+        LSPDocument *doc = lsp_document_find(server, uri);
+        if (doc) {
+          doc->needs_reanalysis = true;
+          analyze_and_publish(server, doc, uri, &temp_arena);
+        }
+      }
+    } else {
+      fprintf(stderr, "[LSP] Unhandled method\n");
+    }
+    break;
+  }
+
   case LSP_METHOD_TEXT_DOCUMENT_HOVER: {
     fprintf(stderr, "[LSP] Handling hover\n");
 
-    const char *uri      = extract_string(message, "uri", &temp_arena);
+    const char *uri = extract_string(message, "uri", &temp_arena);
     LSPPosition position = extract_position(message);
 
-    if (!uri) { lsp_send_response(request_id, "null"); break; }
-
-    LSPDocument *doc = lsp_document_find(server, uri);
-    if (!doc) { lsp_send_response(request_id, "null"); break; }
-
-    ArenaAllocator hover_arena;
-    arena_allocator_init(&hover_arena, 16 * 1024);
-
-    const char *hover_text = lsp_hover(doc, position, &hover_arena);
-    if (hover_text) {
-      size_t ht_len  = strlen(hover_text);
-      size_t buf_len = ht_len * 2 + 128;
-      char *escaped  = (char *)malloc(buf_len);
-      char *result   = (char *)malloc(buf_len + 64);
-      if (escaped && result) {
-        char *d = escaped;
-        for (const char *s = hover_text; *s; s++) {
-          if      (*s == '\\') { *d++ = '\\'; *d++ = '\\'; }
-          else if (*s == '"')  { *d++ = '\\'; *d++ = '"';  }
-          else if (*s == '\n') { *d++ = '\\'; *d++ = 'n';  }
-          else if (*s == '\r') { *d++ = '\\'; *d++ = 'r';  }
-          else                 { *d++ = *s; }
+    if (uri) {
+      LSPDocument *doc = lsp_document_find(server, uri);
+      if (doc) {
+        const char *hover_text = lsp_hover(doc, position, &temp_arena);
+        if (hover_text) {
+          size_t hover_len = strlen(hover_text);
+          size_t result_size = hover_len + 128;
+          char *result = (char *)malloc(result_size);
+          if (result) {
+            snprintf(result, result_size,
+                     "{\"contents\":{\"kind\":\"markdown\",\"value\":\"%s\"}}",
+                     hover_text);
+            lsp_send_response(request_id, result);
+            free(result);
+          } else {
+            lsp_send_response(request_id, "null");
+          }
+        } else {
+          lsp_send_response(request_id, "null");
         }
-        *d = '\0';
-        snprintf(result, buf_len + 64,
-                 "{\"contents\":{\"kind\":\"markdown\",\"value\":\"%s\"}}",
-                 escaped);
-        lsp_send_response(request_id, result);
       } else {
         lsp_send_response(request_id, "null");
       }
-      free(escaped);
-      free(result);
-    } else {
-      lsp_send_response(request_id, "null");
     }
-
-    arena_destroy(&hover_arena);
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_TEXT_DOCUMENT_DEFINITION: {
     fprintf(stderr, "[LSP] Handling definition\n");
 
-    const char *uri      = extract_string(message, "uri", &temp_arena);
+    const char *uri = extract_string(message, "uri", &temp_arena);
     LSPPosition position = extract_position(message);
 
-    if (!uri) { lsp_send_response(request_id, "null"); break; }
-
-    LSPDocument *doc = lsp_document_find(server, uri);
-    if (!doc) { lsp_send_response(request_id, "null"); break; }
-
-    ArenaAllocator def_arena;
-    arena_allocator_init(&def_arena, 16 * 1024);
-
-    LSPLocation *loc = lsp_definition(doc, position, &def_arena);
-    if (loc) {
-      size_t result_len = strlen(loc->uri) + 256;
-      char *result = (char *)malloc(result_len);
-      if (result) {
-        snprintf(result, result_len,
-                 "{\"uri\":\"%s\",\"range\":{\"start\":{\"line\":%d,"
-                 "\"character\":%d},\"end\":{\"line\":%d,\"character\":%d}}}",
-                 loc->uri,
-                 loc->range.start.line, loc->range.start.character,
-                 loc->range.end.line,   loc->range.end.character);
-        lsp_send_response(request_id, result);
-        free(result);
+    if (uri) {
+      LSPDocument *doc = lsp_document_find(server, uri);
+      if (doc) {
+        LSPLocation *loc = lsp_definition(doc, position, &temp_arena);
+        if (loc) {
+          char result[1024];
+          snprintf(result, sizeof(result),
+                   "{\"uri\":\"%s\",\"range\":{\"start\":{\"line\":%d,"
+                   "\"character\":%d},"
+                   "\"end\":{\"line\":%d,\"character\":%d}}}",
+                   loc->uri, loc->range.start.line, loc->range.start.character,
+                   loc->range.end.line, loc->range.end.character);
+          lsp_send_response(request_id, result);
+        } else {
+          lsp_send_response(request_id, "null");
+        }
       } else {
         lsp_send_response(request_id, "null");
       }
-    } else {
-      lsp_send_response(request_id, "null");
     }
-
-    arena_destroy(&def_arena);
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_TEXT_DOCUMENT_COMPLETION: {
     fprintf(stderr, "[LSP] Handling completion\n");
 
-    const char *uri      = extract_string(message, "uri", &temp_arena);
+    const char *uri = extract_string(message, "uri", &temp_arena);
     LSPPosition position = extract_position(message);
 
-    fprintf(stderr, "[LSP] completion: uri=%s line=%d char=%d\n",
+    fprintf(stderr, "[LSP] Completion: uri=%s line=%d character=%d\n",
             uri ? uri : "NULL", position.line, position.character);
 
-    if (!uri) { lsp_send_response(request_id, "{\"items\":[]}"); break; }
-
-    LSPDocument *doc = lsp_document_find(server, uri);
-    if (!doc) {
-      fprintf(stderr, "[LSP] completion: document not found\n");
+    if (!uri) {
       lsp_send_response(request_id, "{\"items\":[]}");
       break;
     }
 
-    // Dedicated 512KB arena — enough for all snippet strings + scope symbols
-    ArenaAllocator comp_arena;
-    arena_allocator_init(&comp_arena, 512 * 1024);
-
-    size_t count = 0;
-    LSPCompletionItem *items =
-        lsp_completion(doc, position, &count, &comp_arena);
-
-    fprintf(stderr, "[LSP] completion: %zu items\n", count);
-
-    if (items && count > 0) {
-      // 640 bytes per item covers the longest snippets with JSON escaping
-      size_t out_size = count * 640 + 64;
-      char *result = (char *)malloc(out_size);
-      if (result) {
-        serialize_completion_items(items, count, result, out_size);
-        lsp_send_response(request_id, result);
-        free(result);
-      } else {
-        lsp_send_response(request_id, "{\"items\":[]}");
-      }
-    } else {
+    LSPDocument *doc = lsp_document_find(server, uri);
+    if (!doc) {
+      fprintf(stderr, "[LSP] Completion: document not found\n");
       lsp_send_response(request_id, "{\"items\":[]}");
+      break;
     }
 
-    arena_destroy(&comp_arena);
+    size_t count = 0;
+    LSPCompletionItem *items = lsp_completion(doc, position, &count, &temp_arena);
+
+    fprintf(stderr, "[LSP] Completion: got %zu items\n", count);
+
+    if (!items || count == 0) {
+      lsp_send_response(request_id, "{\"items\":[]}");
+      break;
+    }
+
+    size_t result_size = count * 512 + 64;
+    char *result = (char *)malloc(result_size);
+    if (!result) {
+      lsp_send_response(request_id, "{\"items\":[]}");
+      break;
+    }
+
+    serialize_completion_items(items, count, result, result_size);
+
+    fprintf(stderr, "[LSP] Completion: sending response (id=%d, items=%zu, bytes=%zu)\n",
+            request_id, count, strlen(result));
+
+    lsp_send_response(request_id, result);
+    free(result);
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_TEXT_DOCUMENT_DOCUMENT_SYMBOL: {
     fprintf(stderr, "[LSP] Handling documentSymbol\n");
 
     const char *uri = extract_string(message, "uri", &temp_arena);
-    if (!uri) { lsp_send_response(request_id, "[]"); break; }
+
+    if (!uri) {
+      lsp_send_response(request_id, "[]");
+      break;
+    }
 
     LSPDocument *doc = lsp_document_find(server, uri);
-    if (!doc) { lsp_send_response(request_id, "[]"); break; }
+    if (!doc) {
+      fprintf(stderr, "[LSP] documentSymbol: document not found for %s\n", uri);
+      lsp_send_response(request_id, "[]");
+      break;
+    }
 
     ArenaAllocator sym_arena;
     arena_allocator_init(&sym_arena, 64 * 1024);
 
     size_t sym_count = 0;
-    LSPDocumentSymbol **symbols =
-        lsp_document_symbols(doc, &sym_count, &sym_arena);
+    LSPDocumentSymbol **symbols = lsp_document_symbols(doc, &sym_count, &sym_arena);
 
     if (!symbols || sym_count == 0) {
       arena_destroy(&sym_arena);
@@ -337,32 +333,28 @@ void lsp_handle_message(LSPServer *server, const char *message) {
     off += snprintf(result + off, buf_size - off, "[");
     for (size_t i = 0; i < sym_count && off < buf_size - 2; i++) {
       LSPDocumentSymbol *sym = symbols[i];
-      if (i > 0)
-        off += snprintf(result + off, buf_size - off, ",");
+      if (i > 0) off += snprintf(result + off, buf_size - off, ",");
       off += snprintf(result + off, buf_size - off,
-                      "{\"name\":\"%s\",\"kind\":%d,"
-                      "\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
-                      "\"end\":{\"line\":%d,\"character\":%d}},"
-                      "\"selectionRange\":{\"start\":{\"line\":%d,"
-                      "\"character\":%d},\"end\":{\"line\":%d,"
-                      "\"character\":%d}}}",
-                      sym->name ? sym->name : "", (int)sym->kind,
-                      sym->range.start.line, sym->range.start.character,
-                      sym->range.end.line,   sym->range.end.character,
-                      sym->selection_range.start.line,
-                      sym->selection_range.start.character,
-                      sym->selection_range.end.line,
-                      sym->selection_range.end.character);
+        "{\"name\":\"%s\",\"kind\":%d,"
+        "\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
+        "\"end\":{\"line\":%d,\"character\":%d}},"
+        "\"selectionRange\":{\"start\":{\"line\":%d,\"character\":%d},"
+        "\"end\":{\"line\":%d,\"character\":%d}}}",
+        sym->name ? sym->name : "", (int)sym->kind,
+        sym->range.start.line, sym->range.start.character,
+        sym->range.end.line,   sym->range.end.character,
+        sym->selection_range.start.line, sym->selection_range.start.character,
+        sym->selection_range.end.line,   sym->selection_range.end.character);
     }
     snprintf(result + off, buf_size - off, "]");
 
+    fprintf(stderr, "[LSP] documentSymbol: sending %zu symbols\n", sym_count);
     lsp_send_response(request_id, result);
     free(result);
     arena_destroy(&sym_arena);
     break;
   }
 
-  // --------------------------------------------------------------------------
   case LSP_METHOD_SHUTDOWN:
     fprintf(stderr, "[LSP] Handling shutdown\n");
     lsp_send_response(request_id, "null");
@@ -370,14 +362,11 @@ void lsp_handle_message(LSPServer *server, const char *message) {
 
   case LSP_METHOD_EXIT:
     fprintf(stderr, "[LSP] Exiting\n");
-    arena_destroy(&temp_arena);
     exit(0);
     break;
 
   default:
-    fprintf(stderr, "[LSP] Unhandled method %d\n", (int)method);
-    if (request_id >= 0)
-      lsp_send_error(request_id, -32601, "Method not found");
+    fprintf(stderr, "[LSP] Unhandled method\n");
     break;
   }
 

@@ -196,6 +196,17 @@ typedef struct {
   bool needs_reanalysis;
 } LSPDocument;
 
+// Cache entry for a parsed dependency module AST.
+// Invalidated when the file's mtime changes — so deps are only re-parsed
+// when actually saved, not on every keystroke of the open document.
+typedef struct {
+  const char *uri;    // file:// URI of the dependency
+  AstNode    *ast;    // result of parse() — owned by cache_arena
+  long        mtime;  // st_mtime when last parsed (time_t is long on all targets)
+} ModuleASTCacheEntry;
+
+#define MODULE_AST_CACHE_MAX 128
+
 typedef struct {
   // Document tracking
   LSPDocument **documents;
@@ -204,6 +215,12 @@ typedef struct {
 
   // Module registry for workspace
   ModuleRegistry module_registry;
+
+  // Per-URI AST cache for dependency modules.
+  // parse_imported_module_ast() checks here before touching the filesystem.
+  ModuleASTCacheEntry ast_cache[MODULE_AST_CACHE_MAX];
+  size_t              ast_cache_count;
+  ArenaAllocator      cache_arena; // owns all cached AST memory
 
   // Server state
   ArenaAllocator *arena;
@@ -243,9 +260,16 @@ void resolve_imports(LSPServer *server, LSPDocument *doc, BuildConfig *config,
                      GrowableArray *imported_modules);
 void build_module_registry(LSPServer *server, const char *workspace_uri);
 const char *lookup_module(LSPServer *server, const char *module_name);
-void lsp_negative_cache_clear(void);
 AstNode *parse_imported_module_ast(LSPServer *server, const char *module_uri,
                                    BuildConfig *config, ArenaAllocator *arena);
+
+// Module AST cache — call after lsp_server_init
+void lsp_ast_cache_init(LSPServer *server);
+// Invalidate a single URI (call when a file is saved/changed)
+void lsp_ast_cache_invalidate(LSPServer *server, const char *uri);
+// Clear the module-not-found negative cache (call on didOpen/didSave)
+void lsp_negative_cache_clear(void);
+void lsp_check_pending_analysis(LSPServer *server);
 
 // ============================================================================
 // LSP FEATURES (Hover, Definition, Completion, etc.)
@@ -278,7 +302,6 @@ void lsp_send_error(int id, int code, const char *message);
 char *extract_string(const char *json, const char *key, ArenaAllocator *arena);
 int extract_int(const char *json, const char *key);
 LSPPosition extract_position(const char *json);
-const char *find_json_value(const char *json, const char *key);
 
 // JSON serialization helpers
 void serialize_diagnostics_to_json(const char *uri, LSPDiagnostic *diagnostics,

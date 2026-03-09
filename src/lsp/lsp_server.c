@@ -13,8 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
@@ -47,16 +47,14 @@ static void install_crash_handlers(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Watchdog: if lsp_handle_message takes longer than WATCHDOG_SECS seconds,
-// log the hang and kill the process so VS Code can restart it cleanly
-// rather than timing out silently.
+// Watchdog
 // ---------------------------------------------------------------------------
 #define WATCHDOG_SECS 10
 
 typedef struct {
   pthread_t        thread;
-  volatile int     active;   // 1 = watchdog is armed
-  volatile int     done;     // 1 = main thread wants watchdog to exit
+  volatile int     active;
+  volatile int     done;
   pthread_mutex_t  mu;
   pthread_cond_t   cv;
 } Watchdog;
@@ -76,12 +74,9 @@ static void *watchdog_thread(void *arg) {
       if (rc == ETIMEDOUT && g_watchdog.active && !g_watchdog.done) {
         fprintf(stderr,
                 "[LSP] *** WATCHDOG: message handler hung for >%d seconds ***\n"
-                "[LSP] This usually means the lexer/parser looped on partial input.\n"
                 "[LSP] Killing process so VS Code can restart the server.\n",
                 WATCHDOG_SECS);
         fflush(stderr);
-        // Exit so VS Code restarts us; don't call abort() as that confuses
-        // the client into showing a different error.
         _exit(1);
       }
     } else {
@@ -119,13 +114,11 @@ static void watchdog_init(void) {
 // ---------------------------------------------------------------------------
 
 const char *lsp_uri_to_path(const char *uri, ArenaAllocator *arena) {
-  if (!uri)
-    return NULL;
+  if (!uri) return NULL;
   if (strncmp(uri, "file://", 7) == 0) {
     const char *path = uri + 7;
 #ifdef _WIN32
-    if (path[0] == '/' && path[2] == ':')
-      path++;
+    if (path[0] == '/' && path[2] == ':') path++;
 #endif
     return arena_strdup(arena, path);
   }
@@ -133,12 +126,10 @@ const char *lsp_uri_to_path(const char *uri, ArenaAllocator *arena) {
 }
 
 const char *lsp_path_to_uri(const char *path, ArenaAllocator *arena) {
-  if (!path)
-    return NULL;
+  if (!path) return NULL;
   size_t len = strlen(path) + 10;
   char *uri = arena_alloc(arena, len, 1);
-  if (!uri)
-    return NULL;
+  if (!uri) return NULL;
 #ifdef _WIN32
   snprintf(uri, len, "file:///%s", path);
 #else
@@ -152,11 +143,11 @@ const char *lsp_path_to_uri(const char *path, ArenaAllocator *arena) {
 // ---------------------------------------------------------------------------
 
 bool lsp_server_init(LSPServer *server, ArenaAllocator *arena) {
-  if (!server || !arena)
-    return false;
+  if (!server || !arena) return false;
 
   install_crash_handlers();
   watchdog_init();
+  lsp_ast_cache_init(server);
 
   server->arena = arena;
   server->initialized = false;
@@ -177,18 +168,41 @@ bool lsp_server_init(LSPServer *server, ArenaAllocator *arena) {
 
 // ---------------------------------------------------------------------------
 // Main server loop
+// Uses select() with a 100ms timeout so we can fire debounced analysis
+// even when no new messages are arriving from the client.
 // ---------------------------------------------------------------------------
 
 void lsp_server_run(LSPServer *server) {
-  if (!server)
-    return;
+  if (!server) return;
 
   fprintf(stderr, "[LSP] Server started, waiting for messages...\n");
   fflush(stderr);
 
+  int stdin_fd = fileno(stdin);
   char header_buf[256];
 
   while (1) {
+    // Wait up to 100ms for stdin to be readable, then check debounce
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(stdin_fd, &fds);
+    struct timeval tv = {0, 100 * 1000}; // 100ms
+
+    int ready = select(stdin_fd + 1, &fds, NULL, NULL, &tv);
+
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      fprintf(stderr, "[LSP] select error: %s\n", strerror(errno));
+      break;
+    }
+
+    if (ready == 0) {
+      // Timeout — check if debounced analysis is due
+      lsp_check_pending_analysis(server);
+      continue;
+    }
+
+    // stdin has data — read next message
     if (!fgets(header_buf, sizeof(header_buf), stdin)) {
       fprintf(stderr, "[LSP] stdin closed, exiting\n");
       break;
@@ -272,8 +286,7 @@ done:
 // ---------------------------------------------------------------------------
 
 void lsp_server_shutdown(LSPServer *server) {
-  if (!server)
-    return;
+  if (!server) return;
 
   for (size_t i = 0; i < server->document_count; i++) {
     if (server->documents[i] && server->documents[i]->arena)

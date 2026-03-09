@@ -90,22 +90,19 @@ LSPDocument *lsp_document_find(LSPServer *server, const char *uri) {
   return NULL;
 }
 
-// NEW: Helper to recursively collect all module dependencies
+// Recursively collect all module dependencies (transitive closure)
 static void collect_all_module_deps(LSPServer *server, const char *module_uri,
                                     BuildConfig *config, ArenaAllocator *arena,
                                     GrowableArray *all_modules,
                                     GrowableArray *visited_uris) {
-  // Check if already visited (prevent cycles)
   for (size_t i = 0; i < visited_uris->count; i++) {
     const char *visited = ((const char **)visited_uris->data)[i];
     if (strcmp(visited, module_uri) == 0) {
-      fprintf(stderr, "[LSP] Skipping already visited module: %s\n",
-              module_uri);
-      return; // Already processed
+      fprintf(stderr, "[LSP] Skipping already visited module: %s\n", module_uri);
+      return;
     }
   }
 
-  // Mark as visited
   const char **visited_slot = (const char **)growable_array_push(visited_uris);
   if (visited_slot) {
     *visited_slot = arena_strdup(arena, module_uri);
@@ -113,7 +110,6 @@ static void collect_all_module_deps(LSPServer *server, const char *module_uri,
 
   fprintf(stderr, "[LSP] Collecting dependencies for: %s\n", module_uri);
 
-  // Parse the module
   AstNode *module_ast =
       parse_imported_module_ast(server, module_uri, config, arena);
 
@@ -122,7 +118,6 @@ static void collect_all_module_deps(LSPServer *server, const char *module_uri,
     return;
   }
 
-  // Extract imports from this module's content
   const char *file_path = lsp_uri_to_path(module_uri, arena);
   if (!file_path) {
     fprintf(stderr, "[LSP] Failed to convert URI to path: %s\n", module_uri);
@@ -144,7 +139,6 @@ static void collect_all_module_deps(LSPServer *server, const char *module_uri,
   content[size] = '\0';
   fclose(f);
 
-  // Create temporary document to extract imports
   LSPDocument temp_doc = {0};
   temp_doc.content = content;
   temp_doc.arena = arena;
@@ -154,7 +148,6 @@ static void collect_all_module_deps(LSPServer *server, const char *module_uri,
   fprintf(stderr, "[LSP] Module %s has %zu imports\n", module_uri,
           temp_doc.import_count);
 
-  // Recursively process each import
   for (size_t i = 0; i < temp_doc.import_count; i++) {
     const char *imported_module_path = temp_doc.imports[i].module_path;
     const char *resolved_uri = lookup_module(server, imported_module_path);
@@ -162,7 +155,6 @@ static void collect_all_module_deps(LSPServer *server, const char *module_uri,
     if (resolved_uri) {
       fprintf(stderr, "[LSP] Recursively processing import: %s -> %s\n",
               imported_module_path, resolved_uri);
-      // Recurse!
       collect_all_module_deps(server, resolved_uri, config, arena, all_modules,
                               visited_uris);
     } else {
@@ -171,7 +163,6 @@ static void collect_all_module_deps(LSPServer *server, const char *module_uri,
     }
   }
 
-  // Add this module to the list (after processing its dependencies)
   AstNode **slot = (AstNode **)growable_array_push(all_modules);
   if (slot) {
     *slot = module_ast;
@@ -196,7 +187,7 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
     }
   }
 
-  // ALSO save the last successful scope
+  // Save the last successful scope
   Scope *last_successful_scope = doc->scope;
 
   arena_destroy(doc->arena);
@@ -246,10 +237,8 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
     fprintf(stderr, "[LSP] Parse has %d errors, skipping typecheck\n",
             error_get_count());
 
-    // PRESERVE the last successful scope for completions
     if (last_successful_scope) {
-      fprintf(stderr,
-              "[LSP] Preserving last successful scope for completions\n");
+      fprintf(stderr, "[LSP] Preserving last successful scope for completions\n");
       doc->scope = last_successful_scope;
     } else {
       doc->scope = NULL;
@@ -261,14 +250,13 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
     return false;
   }
 
-  // NEW: Recursively collect ALL module dependencies (transitive closure)
+  // Collect ALL module dependencies (transitive closure)
   GrowableArray all_modules;
   growable_array_init(&all_modules, doc->arena, 16, sizeof(AstNode *));
 
   GrowableArray visited_uris;
   growable_array_init(&visited_uris, doc->arena, 16, sizeof(const char *));
 
-  // Collect all transitive dependencies
   for (size_t i = 0; i < doc->import_count; i++) {
     ImportedModule *import = &doc->imports[i];
     const char *resolved_uri = lookup_module(server, import->module_path);
@@ -279,7 +267,7 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
     }
   }
 
-  // Add the main module last (so it can see all dependencies)
+  // Add the main module last
   AstNode *main_module = doc->ast;
   if (doc->ast->type == AST_PROGRAM &&
       doc->ast->stmt.program.module_count > 0) {
@@ -296,7 +284,6 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
       doc->arena, (AstNode **)all_modules.data, all_modules.count, 0, 0);
 
   if (!combined_program) {
-    // Preserve last scope on error
     if (last_successful_scope) {
       doc->scope = last_successful_scope;
     } else {
@@ -310,7 +297,6 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
   Scope *global_scope =
       arena_alloc(server->arena, sizeof(Scope), alignof(Scope));
   if (!global_scope) {
-    // Preserve last scope on error
     if (last_successful_scope) {
       doc->scope = last_successful_scope;
     } else {
@@ -326,6 +312,18 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
 
   tc_error_init(doc->tokens, doc->token_count, file_path, doc->arena);
 
+  // IMPORTANT: The typechecker mutates AST nodes (resolves and writes types
+  // back into the nodes inline). Since dependency ASTs live in cache_arena and
+  // are reused across analyses, each typecheck run would corrupt them further —
+  // visible as the "peek expects 2 arguments, got 3/4/5/6..." error that grows
+  // by one on every didChange. We invalidate all cache entries before running
+  // the typechecker so stale mutated ASTs are never reused. The mtime-based
+  // cache will repopulate cleanly on the next parse pass.
+  for (size_t i = 0; i < server->ast_cache_count; i++) {
+    server->ast_cache[i].ast   = NULL;
+    server->ast_cache[i].mtime = 0;
+  }
+
   fprintf(stderr, "[LSP] Starting typecheck with %zu modules...\n",
           all_modules.count);
 
@@ -339,9 +337,7 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
           success ? "success" : "failed", error_get_count());
 
   if (!success) {
-    fprintf(stderr,
-            "[LSP] Typecheck failed, preserving last successful scope\n");
-    // On typecheck failure, preserve the last successful scope if we have one
+    fprintf(stderr, "[LSP] Typecheck failed, preserving last successful scope\n");
     if (last_successful_scope) {
       doc->scope = last_successful_scope;
     } else {
@@ -354,8 +350,7 @@ bool lsp_document_analyze(LSPDocument *doc, LSPServer *server,
     for (size_t i = 0; i < doc->import_count; i++) {
       ImportedModule *import = &doc->imports[i];
 
-      // Find the corresponding module AST node
-      for (size_t j = 0; j < all_modules.count - 1; j++) { // -1 to skip main
+      for (size_t j = 0; j < all_modules.count - 1; j++) {
         AstNode *module_ast = ((AstNode **)all_modules.data)[j];
 
         if (module_ast->type == AST_PREPROCESSOR_MODULE) {
