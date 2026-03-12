@@ -330,20 +330,20 @@ static void token_display_col_and_len(Token *tok, int *out_col, int *out_len) {
 
   case TOK_COMMENT:
     /* value excludes the leading // (2 chars) */
+    fprintf(stderr, "[LSP] comment token line: (%d) col: (%d) len: (%d)\n", 
+                                    tok->line, tok->col, tok->length);
     *out_len = raw_len + 2;
     *out_col = (int)tok->col - raw_len;
     break;
 
-  case TOK_DOC_COMMENT:
-    /* value excludes the leading /// (3 chars) */
-    *out_len = raw_len + 3;
-    *out_col = (int)tok->col - raw_len;
+  case TOK_DOC_COMMENT: /* '///' */
+    *out_len = raw_len == 0 ? 3 : raw_len + 4;
+    *out_col = raw_len == 0 ? (int)tok->col - 2 : (int)tok->col - raw_len - 3;
     break;
 
-  case TOK_MODULE_DOC:
-    /* value excludes the leading //! (3 chars) */
-    *out_len = raw_len + 3;
-    *out_col = (int)tok->col - raw_len;
+  case TOK_MODULE_DOC: /* '//!' */
+    *out_len = raw_len == 0 ? 3 : raw_len + 4;
+    *out_col = raw_len == 0 ? (int)tok->col - 2 : (int)tok->col - raw_len - 3;
     break;
 
   default:
