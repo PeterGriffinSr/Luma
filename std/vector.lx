@@ -44,6 +44,24 @@ const local_realloc -> fn (ptr: *void, old_size: int, new_size: int) *void {
     return new_ptr;
 }
 
+pub const VectorIter -> struct {
+    data: *void,
+    index: int,
+    size: int,
+    element_size: int,
+
+    next -> fn () *void {
+        if (self.index >= self.size) return NULL;
+
+        let elem: *void = cast<*void>(
+            cast<int>(self.data) + (self.index * self.element_size)
+        );
+
+        self.index = self.index + 1;
+        return elem;
+    }
+};
+
 /// A dynamic array that can grow as needed.
 ///
 /// Vector stores elements of a fixed size in contiguous memory.
@@ -218,6 +236,15 @@ pub const Vector -> struct {
         return cast<*void>(
             cast<int>(self.data) + (index * self.element_size)
         );
+    },
+
+    iter -> fn () VectorIter {
+        return VectorIter {
+            data: self.data,
+            index: 0,
+            size: self.size,
+            element_size: self.element_size,
+        };
     }
 };
 
