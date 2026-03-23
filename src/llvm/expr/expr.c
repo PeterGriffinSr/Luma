@@ -1911,10 +1911,10 @@ static uint64_t compute_type_size(LLVMTypeRef type) {
     LLVMGetStructElementTypes(type, field_types);
 
     uint64_t total_size = 0;
-    uint64_t max_align  = 1;
+    uint64_t max_align = 1;
 
     for (unsigned i = 0; i < field_count; i++) {
-      uint64_t fsize  = compute_type_size(field_types[i]);  // recurse
+      uint64_t fsize = compute_type_size(field_types[i]); // recurse
       uint64_t falign = fsize > 8 ? 8 : (fsize == 0 ? 1 : fsize);
 
       // align current offset
@@ -2087,22 +2087,16 @@ LLVMValueRef codegen_expr_deref(CodeGenContext *ctx, AstNode *node) {
 
 // &expr - get address of expression
 LLVMValueRef codegen_expr_addr(CodeGenContext *ctx, AstNode *node) {
-  // The address-of operator should only work on lvalues (variables,
-  // dereferenced pointers, etc.)
   AstNode *target = node->expr.addr.object;
 
   if (target->type == AST_EXPR_IDENTIFIER) {
-    // Get address of a variable
     LLVM_Symbol *sym = find_symbol(ctx, target->expr.identifier.name);
     if (sym && !sym->is_function) {
-      // Return the alloca/global directly (it's already a pointer)
       return sym->value;
     }
   } else if (target->type == AST_EXPR_DEREF) {
-    // &(*ptr) == ptr
     return codegen_expr(ctx, target->expr.deref.object);
   } else if (target->type == AST_EXPR_INDEX) {
-    // ADD THIS CASE: Handle &arr[i] for pointer indexing
     LLVMValueRef object = codegen_expr(ctx, target->expr.index.object);
     if (!object) {
       return NULL;
@@ -2117,7 +2111,6 @@ LLVMValueRef codegen_expr_addr(CodeGenContext *ctx, AstNode *node) {
     LLVMTypeKind object_kind = LLVMGetTypeKind(object_type);
 
     if (object_kind == LLVMPointerTypeKind) {
-      // For pointer indexing, determine element type
       LLVMTypeRef element_type = NULL;
 
       if (target->expr.index.object->type == AST_EXPR_IDENTIFIER) {
@@ -2128,7 +2121,6 @@ LLVMValueRef codegen_expr_addr(CodeGenContext *ctx, AstNode *node) {
         }
       }
 
-      // Fallback: infer from variable name (temporary)
       if (!element_type &&
           target->expr.index.object->type == AST_EXPR_IDENTIFIER) {
         const char *var_name = target->expr.index.object->expr.identifier.name;
@@ -2144,11 +2136,9 @@ LLVMValueRef codegen_expr_addr(CodeGenContext *ctx, AstNode *node) {
         return NULL;
       }
 
-      // Return the address directly using GEP (don't load)
       return LLVMBuildGEP2(ctx->builder, element_type, object, &index, 1,
                            "element_addr");
     } else if (object_kind == LLVMArrayTypeKind) {
-      // For array indexing
       LLVMValueRef array_ptr;
 
       if (target->expr.index.object->type == AST_EXPR_IDENTIFIER) {
@@ -2173,26 +2163,75 @@ LLVMValueRef codegen_expr_addr(CodeGenContext *ctx, AstNode *node) {
                            "array_element_addr");
     }
   } else if (target->type == AST_EXPR_MEMBER) {
-    // Handle &(obj.field) - taking address of a member access expression
-    // This is needed for method calls like obj.method() where the typechecker
-    // injects &obj as the first argument
+    const char *field_name = target->expr.member.member;
+    AstNode *object = target->expr.member.object;
 
-    // Just evaluate the member access and allocate temporary storage for it
+    if (object->type == AST_EXPR_IDENTIFIER) {
+      LLVM_Symbol *sym = find_symbol(ctx, object->expr.identifier.name);
+      if (!sym || sym->is_function) {
+        fprintf(stderr, "Error: Variable not found for address-of member\n");
+        return NULL;
+      }
+
+      StructInfo *struct_info = NULL;
+      LLVMTypeRef sym_type = sym->type;
+
+      // Find struct info by matching llvm_type directly
+      for (StructInfo *info = ctx->struct_types; info; info = info->next) {
+        if (info->llvm_type == sym_type ||
+            (LLVMGetTypeKind(sym_type) == LLVMPointerTypeKind &&
+             info->llvm_type == sym->element_type)) {
+          struct_info = info;
+          break;
+        }
+      }
+
+      // Fallback: find by field name
+      if (!struct_info) {
+        struct_info = find_struct_by_field_cached(ctx, field_name);
+      }
+
+      if (!struct_info) {
+        fprintf(stderr, "Error: Could not find struct for field '%s'\n",
+                field_name);
+        return NULL;
+      }
+
+      int field_index = get_field_index(struct_info, field_name);
+      if (field_index < 0) {
+        fprintf(stderr, "Error: Field '%s' not found in struct '%s'\n",
+                field_name, struct_info->name);
+        return NULL;
+      }
+
+      // Get the struct pointer — sym->value is the alloca for a direct struct,
+      // or an alloca holding a pointer for pointer-to-struct
+      LLVMValueRef struct_ptr = sym->value;
+      if (LLVMGetTypeKind(sym_type) == LLVMPointerTypeKind) {
+        struct_ptr = LLVMBuildLoad2(ctx->builder,
+                                    LLVMPointerType(struct_info->llvm_type, 0),
+                                    sym->value, "load_struct_ptr");
+      }
+
+      // Return a GEP directly into the struct field — no copy
+      return LLVMBuildStructGEP2(ctx->builder, struct_info->llvm_type,
+                                 struct_ptr, field_index, "field_addr");
+    }
+
+    // Fallback for non-identifier objects (chained access etc.)
+    // Still use temp storage as before, but emit a warning
+    fprintf(stderr, "Warning: Taking address of complex member expression — "
+                    "writes through this pointer may not persist\n");
     LLVMValueRef member_value = codegen_expr_struct_access(ctx, target);
     if (!member_value) {
       fprintf(stderr,
               "Error: Failed to evaluate member access for address-of\n");
       return NULL;
     }
-
     LLVMTypeRef member_type = LLVMTypeOf(member_value);
-
-    // Allocate temporary storage and store the value
     LLVMValueRef temp_storage =
         LLVMBuildAlloca(ctx->builder, member_type, "member_addr_temp");
     LLVMBuildStore(ctx->builder, member_value, temp_storage);
-
-    // Return pointer to the temporary storage
     return temp_storage;
   }
 
