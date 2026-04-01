@@ -142,17 +142,25 @@ bool generate_llvm_code_modules(AstNode *root, BuildConfig config,
   print_progress_with_time(++(*step), 9, "Linking", timer);
 
   cleanup_module_caches();
-  
+
   cleanup_codegen_context(ctx);
   return true;
 }
 
-// Helper function to link all object files in a directory
 bool link_object_files(const char *output_dir, const char *executable_name,
                        int opt_level) {
   char command[2048];
 
-  // Build the linking command with PIE-compatible flags
+#if defined(__APPLE__)
+  // macOS: don't pass -pie (it's default and causes issues), use -lSystem
+  if (opt_level > 0) {
+    snprintf(command, sizeof(command), "cc -O%d %s/*.o -o %s -lSystem",
+             opt_level, output_dir, executable_name);
+  } else {
+    snprintf(command, sizeof(command), "cc %s/*.o -o %s -lSystem", output_dir,
+             executable_name);
+  }
+#else
   if (opt_level > 0) {
     snprintf(command, sizeof(command), "cc -O%d -pie %s/*.o -o %s", opt_level,
              output_dir, executable_name);
@@ -160,29 +168,29 @@ bool link_object_files(const char *output_dir, const char *executable_name,
     snprintf(command, sizeof(command), "cc -pie %s/*.o -o %s", output_dir,
              executable_name);
   }
+#endif
 
   int result = system(command);
   if (result != 0) {
     fprintf(stderr, "Linking failed with exit code %d\n", result);
-
-    // Try alternative linking approach
+    // Remove the -no-pie fallback on macOS, it's not valid there
+#if !defined(__APPLE__)
     printf("Trying alternative linking approach...\n");
     snprintf(command, sizeof(command), "gcc -O%d -no-pie %s/*.o -o %s",
              opt_level, output_dir, executable_name);
-
-    printf("Alternative linking command: %s\n", command);
     result = system(command);
-
     if (result != 0) {
       fprintf(stderr, "Alternative linking also failed with exit code %d\n",
               result);
       return false;
     }
+#else
+    return false;
+#endif
   }
 
   return true;
 }
-
 // UPDATED parse_file_to_module
 Stmt *parse_file_to_module(const char *path, size_t position,
                            ArenaAllocator *allocator, BuildConfig *config) {
