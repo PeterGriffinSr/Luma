@@ -137,7 +137,6 @@ void build_dependency_graph(AstNode **modules, size_t module_count,
 bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
                              AstNode **modules, size_t module_count,
                              Scope *global_scope, ArenaAllocator *arena) {
-  // Find this module's dependency info
   ModuleDependency *current_dep = NULL;
   for (size_t i = 0; i < dep_graph->count; i++) {
     ModuleDependency *dep = (ModuleDependency *)((char *)dep_graph->data +
@@ -149,11 +148,10 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
   }
 
   if (!current_dep)
-    return true; // Module not found, skip
+    return true;
   if (current_dep->processed)
-    return true; // Already processed
+    return true;
 
-  // First, process all dependencies recursively
   for (size_t i = 0; i < current_dep->dependencies.count; i++) {
     const char **dep_name =
         (const char **)((char *)current_dep->dependencies.data +
@@ -179,11 +177,9 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
     return false;
   }
 
-  // UPDATE ERROR CONTEXT FOR THIS MODULE
   g_tokens = module->preprocessor.module.tokens;
   g_token_count = module->preprocessor.module.token_count;
   g_file_path = module->preprocessor.module.file_path;
-
   tc_error_init(g_tokens, g_token_count, g_file_path, arena);
 
   Scope *module_scope = find_module_scope(global_scope, module_name);
@@ -196,14 +192,13 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
   AstNode **body = module->preprocessor.module.body;
   int body_count = module->preprocessor.module.body_count;
 
-  // ===== PASS 1: Process forward declarations (prototypes) =====
+  // ===== PASS 1: Forward declarations =====
   for (int j = 0; j < body_count; j++) {
     if (!body[j])
       continue;
     if (body[j]->type == AST_PREPROCESSOR_USE)
-      continue; // Already processed
+      continue;
 
-    // Process function prototypes
     if (body[j]->type == AST_STMT_FUNCTION &&
         body[j]->stmt.func_decl.forward_declared) {
       if (!typecheck_func_decl(body[j], module_scope, arena)) {
@@ -215,11 +210,9 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
     }
   }
 
-  // ===== PASS 1b: Pre-regester function signatures inside @os blocks
+  // ===== PASS 1b: Pre-register @os symbols (functions AND constants) =====
   for (int j = 0; j < body_count; j++) {
-    if (!body[j])
-      continue;
-    if (body[j]->type != AST_PREPROCESSOR_OS)
+    if (!body[j] || body[j]->type != AST_PREPROCESSOR_OS)
       continue;
 
     AstNode *os_node = body[j];
@@ -235,10 +228,8 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
         break;
       }
     }
-
-    if (!matched_body && os_node->preprocessor.os.has_default) {
+    if (!matched_body && os_node->preprocessor.os.has_default)
       matched_body = os_node->preprocessor.os.default_body;
-    }
     if (!matched_body || matched_body->type != AST_STMT_BLOCK)
       continue;
 
@@ -261,24 +252,31 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
               inner->stmt.func_decl.returns_ownership,
               inner->stmt.func_decl.takes_ownership, arena);
         }
+      } else {
+        // For constants and everything else, just typecheck them directly
+        // into the module scope so they're visible to the rest of the module
+        if (!scope_lookup_current_only(module_scope,
+                                       inner->type == AST_STMT_VAR_DECL
+                                           ? inner->stmt.var_decl.name
+                                           : NULL)) {
+          typecheck(inner, module_scope, arena, module_scope->config);
+        }
       }
     }
   }
 
-  // ===== PASS 2: Process all other declarations =====
+  // ===== PASS 2: Everything except @os and forward decls =====
   for (int j = 0; j < body_count; j++) {
     if (!body[j])
       continue;
     if (body[j]->type == AST_PREPROCESSOR_USE)
-      continue; // Already processed
-
-    // Skip prototypes (already processed)
-    if (body[j]->type == AST_STMT_FUNCTION &&
-        body[j]->stmt.func_decl.forward_declared) {
       continue;
-    }
+    if (body[j]->type == AST_PREPROCESSOR_OS)
+      continue;
+    if (body[j]->type == AST_STMT_FUNCTION &&
+        body[j]->stmt.func_decl.forward_declared)
+      continue;
 
-    // Process everything else (including function implementations)
     if (!typecheck(body[j], module_scope, arena, global_scope->config)) {
       tc_error(body[j], "Module Error",
                "Failed to typecheck statement in module '%s'", module_name);
@@ -286,10 +284,20 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
     }
   }
 
-  // Store the module scope in the AST node for LSP
+  // ===== PASS 3: Typecheck @os blocks =====
+  for (int j = 0; j < body_count; j++) {
+    if (!body[j] || body[j]->type != AST_PREPROCESSOR_OS)
+      continue;
+
+    if (!typecheck_os_stmt(body[j], module_scope, arena)) {
+      tc_error(body[j], "Module Error",
+               "Failed to typecheck @os block in module '%s'", module_name);
+      return false;
+    }
+  }
+
   module->preprocessor.module.scope = (void *)module_scope;
 
-  // Run memory analysis if enabled
   StaticMemoryAnalyzer *analyzer = get_static_analyzer(module_scope);
   if (analyzer && g_tokens && g_token_count > 0 && g_file_path &&
       global_scope->config->check_mem) {
@@ -306,18 +314,28 @@ bool typecheck_os_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena) {
     return false;
   }
 
-  const char *target_os = scope->config ? scope->config->target_os : NULL;
+  // Walk up to find config if not set on this scope
+  BuildConfig *config = scope->config;
+  if (!config) {
+    Scope *current = scope->parent;
+    while (current) {
+      if (current->config) {
+        config = current->config;
+        break;
+      }
+      current = current->parent;
+    }
+  }
 
-  // Require a target to be set — the compiler should always know its target
+  const char *target_os = config ? config->target_os : NULL;
+
   if (!target_os) {
     tc_error(node, "@os Error",
              "@os block requires a target OS to be set (--target-os flag)");
     return false;
   }
 
-  // Find the matching arm
   AstNode *matched_body = NULL;
-
   for (size_t i = 0; i < node->preprocessor.os.arm_count; i++) {
     if (strcmp(node->preprocessor.os.platforms[i], target_os) == 0) {
       matched_body = node->preprocessor.os.bodies[i];
@@ -325,20 +343,12 @@ bool typecheck_os_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena) {
     }
   }
 
-  // Fall back to default arm if no platform matched
-  if (!matched_body && node->preprocessor.os.has_default) {
+  if (!matched_body && node->preprocessor.os.has_default)
     matched_body = node->preprocessor.os.default_body;
-  }
 
-  // No match and no default — not necessarily an error, just a no-op
-  // (e.g. an @os block that only handles "windows" is fine on linux
-  //  if the user doesn't need those symbols there)
-  if (!matched_body) {
+  if (!matched_body)
     return true;
-  }
 
-  // Typecheck the matched body's statements directly into the current scope
-  // (not a child scope — @os declarations need to be visible at module level)
   if (matched_body->type != AST_STMT_BLOCK) {
     tc_error(matched_body, "Internal Error",
              "@os arm body must be a block statement");
@@ -350,7 +360,16 @@ bool typecheck_os_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena) {
     if (!stmt)
       continue;
 
-    if (!typecheck(stmt, scope, arena, scope->config)) {
+    if (stmt->type == AST_STMT_FUNCTION) {
+      if (!typecheck_func_decl(stmt, scope, arena)) {
+        tc_error(stmt, "@os Error",
+                 "Failed to typecheck function in @os \"%s\" arm", target_os);
+        return false;
+      }
+      continue;
+    }
+
+    if (!typecheck(stmt, scope, arena, config)) {
       tc_error(stmt, "@os Error",
                "Failed to typecheck statement in @os \"%s\" arm", target_os);
       return false;

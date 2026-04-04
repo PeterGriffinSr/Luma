@@ -146,12 +146,7 @@ bool scope_add_symbol_with_ownership(Scope *scope, const char *name,
                                      ArenaAllocator *arena) {
   Symbol *existing = scope_lookup_current_only(scope, name);
   if (existing) {
-    // Build a dummy node for error location using the type node if available
-    if (type) {
-      tc_error(type, "Redeclaration",
-               "Symbol '%s' already declared in this scope", name);
-    }
-    return false;
+    return true; // Already registered, skip silently
   }
 
   Symbol *s = (Symbol *)growable_array_push(&scope->symbols);

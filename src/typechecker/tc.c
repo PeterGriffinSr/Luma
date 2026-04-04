@@ -3,19 +3,19 @@
 #include "../helper/help.h"
 #include "type.h"
 
-// Updated typecheck function in tc.c
 bool typecheck(AstNode *node, Scope *scope, ArenaAllocator *arena,
                BuildConfig *config) {
-    scope->config = config;
+  scope->config = config;
 
-  // Propagate config to all existing child scopes
+  // Propagate to all child scopes that don't have config yet
   for (size_t i = 0; i < scope->children.count; i++) {
-    Scope **child_ptr = (Scope **)((char *)scope->children.data + i * sizeof(Scope *));
+    Scope **child_ptr = (Scope **)((char *)scope->children.data +
+                                   i * sizeof(Scope *));
     if (*child_ptr && !(*child_ptr)->config) {
       (*child_ptr)->config = config;
     }
   }
-  
+
   switch (node->category) {
   case Node_Category_STMT:
     return typecheck_statement(node, scope, arena);
@@ -42,10 +42,9 @@ bool typecheck(AstNode *node, Scope *scope, ArenaAllocator *arena,
       return false;
     }
 
-  default: {
+  default:
     tc_error(node, "Unsupported Node", "Unsupported node category %d",
              node->category);
     return false;
-  }
   }
 }
