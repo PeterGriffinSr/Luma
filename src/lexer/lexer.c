@@ -93,12 +93,14 @@ static const KeywordEntry preprocessor_directives[] = {
     {"@module", TOK_MODULE},
     {"@use", TOK_USE},
     {"@os", TOK_OS},
+    {"@link", TOK_LINK},
 };
 
 static const KeywordEntry function_attributes[] = {
     {"#returns_ownership", TOK_RETURNES_OWNERSHIP},
     {"#takes_ownership", TOK_TAKES_OWNERSHIP},
     {"#dll_import", TOK_DLL_IMPORT},
+    {"#lib_import", TOK_LIB_IMPORT},
 };
 
 /**

@@ -466,6 +466,8 @@ Stmt *parse_stmt(Parser *parser) {
   bool takes_ownership = false;
   bool is_public = false;
   bool is_dll_import = false;
+  bool is_lib_import = false;
+  const char *lib_name = NULL;
   const char *dll_name = NULL;
   const char *dll_callconv = NULL;
 
@@ -473,7 +475,8 @@ Stmt *parse_stmt(Parser *parser) {
   // #dll_import)
   while (p_current(parser).type_ == TOK_RETURNES_OWNERSHIP ||
          p_current(parser).type_ == TOK_TAKES_OWNERSHIP ||
-         p_current(parser).type_ == TOK_DLL_IMPORT) {
+         p_current(parser).type_ == TOK_DLL_IMPORT ||
+         p_current(parser).type_ == TOK_LIB_IMPORT) {
 
     if (p_current(parser).type_ == TOK_RETURNES_OWNERSHIP) {
       returns_ownership = true;
@@ -537,6 +540,23 @@ Stmt *parse_stmt(Parser *parser) {
       }
 
       p_consume(parser, TOK_RPAREN, "Expected ')' to close #dll_import");
+    } else if (p_current(parser).type_ == TOK_LIB_IMPORT) {
+      is_lib_import = true;
+      p_advance(parser); // consume #lib_import
+
+      p_consume(parser, TOK_LPAREN, "Expected '(' after #lib_import");
+
+      if (p_current(parser).type_ != TOK_STRING) {
+        parser_error(parser, "SyntaxError", parser->file_path,
+                     "Expected library name string as argument to #lib_import",
+                     p_current(parser).line, p_current(parser).col,
+                     p_current(parser).length);
+        return NULL;
+      }
+      lib_name = arena_strdup(parser->arena, get_name(parser));
+      p_advance(parser);
+
+      p_consume(parser, TOK_RPAREN, "Expected ')' to close #lib_import");
     }
   }
 
@@ -557,6 +577,9 @@ Stmt *parse_stmt(Parser *parser) {
     break;
   case TOK_OS:
     node = os_stmt(parser);
+    break;
+  case TOK_LINK:
+    node = link_stmt(parser);
     break;
   case TOK_CONST:
     node = const_stmt(parser, is_public, returns_ownership, takes_ownership);
@@ -609,6 +632,16 @@ Stmt *parse_stmt(Parser *parser) {
       return NULL;
     }
     apply_dll_import(node, dll_name, dll_callconv);
+  }
+
+  if (node && is_lib_import) {
+    if (node->type != AST_STMT_FUNCTION) {
+      parser_error(parser, "SyntaxError", parser->file_path,
+                   "#lib_import can only be applied to function declarations",
+                   node->line, node->column, 0);
+      return NULL;
+    }
+    apply_lib_import(node, lib_name);
   }
 
   return node;

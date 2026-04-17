@@ -511,6 +511,26 @@ LLVMValueRef codegen_stmt_os(CodeGenContext *ctx, AstNode *node) {
   return last;
 }
 
+LLVMValueRef codegen_stmt_link(CodeGenContext *ctx, AstNode *node) {
+  // @link is a linker directive — nothing to emit at IR level.
+  // The lib name is stored on the module node and consumed by the
+  // linker invocation step, not here.
+  // We just record it on the current module unit so the driver can
+  // collect it later when building the link command.
+  if (!ctx->current_module || !node->preprocessor.link.lib_name) {
+    return NULL;
+  }
+
+  // Grow the link_libs list on the module unit
+  // (add link_libs / link_lib_count to ModuleCompilationUnit in llvm.h)
+  if (ctx->current_module->link_lib_count < MAX_LINK_LIBS) {
+    ctx->current_module->link_libs[ctx->current_module->link_lib_count++] =
+        node->preprocessor.link.lib_name;
+  }
+
+  return NULL;
+}
+
 void import_module_symbols(CodeGenContext *ctx,
                            ModuleCompilationUnit *source_module,
                            const char *alias) {

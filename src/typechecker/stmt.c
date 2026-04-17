@@ -285,6 +285,21 @@ bool typecheck_func_decl(AstNode *node, Scope *scope, ArenaAllocator *arena) {
     return false;
   }
 
+  if (node->stmt.func_decl.is_lib_import ||
+      node->stmt.func_decl.is_dll_import) {
+    // External function — register the symbol but don't typecheck the body
+    // (there is no body)
+    AstNode *func_type = create_function_type(
+        arena, node->stmt.func_decl.param_types,
+        node->stmt.func_decl.param_count, node->stmt.func_decl.return_type,
+        node->line, node->column);
+    return scope_add_symbol_with_ownership(
+        scope, node->stmt.func_decl.name, func_type,
+        node->stmt.func_decl.is_public, false,
+        node->stmt.func_decl.returns_ownership,
+        node->stmt.func_decl.takes_ownership, arena);
+  }
+
   // Main function validation
   if (strcmp(name, "main") == 0) {
     if (strcmp(return_type->type_data.basic.name, "int") != 0) {

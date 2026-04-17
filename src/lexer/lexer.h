@@ -74,11 +74,13 @@ typedef enum {
   TOK_MODULE, /**< @module */
   TOK_USE,    /**< @use */
   TOK_OS,     /**< @os */
+  TOK_LINK,   /**< @link */
 
   // function attibutes
   TOK_RETURNES_OWNERSHIP, /** #returns_ownership */
   TOK_TAKES_OWNERSHIP,    /** #takes_ownership */
   TOK_DLL_IMPORT,         /** #dll_import */
+  TOK_LIB_IMPORT,         /** #lib_import */
 
   // Symbols
   TOK_SYMBOL,      /**< Fallback symbol */

@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -135,7 +136,7 @@ bool generate_llvm_code_modules(AstNode *root, BuildConfig config,
   char exe_file[256];
   snprintf(exe_file, sizeof(exe_file), "%s", base_name);
 
-  if (!link_object_files(output_dir, exe_file, config.opt_level)) {
+  if (!link_object_files(output_dir, exe_file, config.opt_level, ctx)) {
     cleanup_codegen_context(ctx);
     return false;
   }
@@ -149,25 +150,60 @@ bool generate_llvm_code_modules(AstNode *root, BuildConfig config,
 }
 
 bool link_object_files(const char *output_dir, const char *executable_name,
-                       int opt_level) {
-  char command[2048];
+                       int opt_level, CodeGenContext *ctx) {
+  // Collect all @link libraries across all modules (deduplicated)
+  char lib_flags[1024] = {0};
+  const char *seen[MAX_LINK_LIBS];
+  size_t seen_count = 0;
 
-#if defined(__APPLE__)
-  // macOS: don't pass -pie (it's default and causes issues), use -lSystem
-  if (opt_level > 0) {
-    snprintf(command, sizeof(command), "cc -O%d %s/*.o -o %s -lSystem",
-             opt_level, output_dir, executable_name);
-  } else {
-    snprintf(command, sizeof(command), "cc %s/*.o -o %s -lSystem", output_dir,
-             executable_name);
+  if (ctx) {
+    for (ModuleCompilationUnit *unit = ctx->modules; unit; unit = unit->next) {
+      for (size_t i = 0; i < unit->link_lib_count; i++) {
+        const char *lib = unit->link_libs[i];
+
+        // Deduplicate
+        bool already_seen = false;
+        for (size_t j = 0; j < seen_count; j++) {
+          if (strcmp(seen[j], lib) == 0) {
+            already_seen = true;
+            break;
+          }
+        }
+        if (already_seen)
+          continue;
+        seen[seen_count++] = lib;
+
+        // "libc.so.6" or "libm.so.2" -> -l:libname  (versioned soname)
+        // "pthread" or "m"            -> -lpthread    (bare name)
+        char flag[256];
+        if (strstr(lib, ".so") || strstr(lib, ".dylib") || strstr(lib, ".a")) {
+          snprintf(flag, sizeof(flag), " -l:%s", lib);
+        } else {
+          snprintf(flag, sizeof(flag), " -l%s", lib);
+        }
+        strncat(lib_flags, flag, sizeof(lib_flags) - strlen(lib_flags) - 1);
+      }
+    }
   }
+
+  char command[2048];
+  // ... your existing platform switch, just append lib_flags at the end ...
+#if defined(__APPLE__)
+  if (opt_level > 0)
+    snprintf(command, sizeof(command), "cc -O%d %s/*.o -o %s -lSystem%s",
+             opt_level, output_dir, executable_name, lib_flags);
+  else
+    snprintf(command, sizeof(command), "cc %s/*.o -o %s -lSystem%s", output_dir,
+             executable_name, lib_flags);
 #else
   if (opt_level > 0) {
-    snprintf(command, sizeof(command), "cc -O%d -pie %s/*.o -o %s", opt_level,
-             output_dir, executable_name);
+    snprintf(command, sizeof(command), "cc -O%d -pie %s/*.o -o %s%s", opt_level,
+             output_dir, executable_name, lib_flags);
+    printf("\n\nCommand: %s\n\n", command);
   } else {
-    snprintf(command, sizeof(command), "cc -pie %s/*.o -o %s", output_dir,
-             executable_name);
+    snprintf(command, sizeof(command), "cc -pie %s/*.o -o %s%s", output_dir,
+             executable_name, lib_flags);
+    printf("\n\nCommand: %s\n\n", command);
   }
 #endif
 

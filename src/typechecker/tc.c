@@ -9,8 +9,8 @@ bool typecheck(AstNode *node, Scope *scope, ArenaAllocator *arena,
 
   // Propagate to all child scopes that don't have config yet
   for (size_t i = 0; i < scope->children.count; i++) {
-    Scope **child_ptr = (Scope **)((char *)scope->children.data +
-                                   i * sizeof(Scope *));
+    Scope **child_ptr =
+        (Scope **)((char *)scope->children.data + i * sizeof(Scope *));
     if (*child_ptr && !(*child_ptr)->config) {
       (*child_ptr)->config = config;
     }
@@ -36,6 +36,8 @@ bool typecheck(AstNode *node, Scope *scope, ArenaAllocator *arena,
       return typecheck_use_stmt(node, scope, scope, arena);
     case AST_PREPROCESSOR_OS:
       return typecheck_os_stmt(node, scope, arena);
+    case AST_PREPROCESSOR_LINK:
+      return typecheck_link_stmt(node, scope, arena);
     default:
       tc_error(node, "SyntaxError", "Unknown preprocessor node type %d",
                node->type);

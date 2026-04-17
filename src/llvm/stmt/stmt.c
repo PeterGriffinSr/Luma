@@ -166,6 +166,7 @@ LLVMValueRef codegen_stmt_function(CodeGenContext *ctx, AstNode *node) {
   const char *func_name = node->stmt.func_decl.name;
   bool forward_declared = node->stmt.func_decl.forward_declared;
   bool is_dll_import = node->stmt.func_decl.is_dll_import;
+  bool is_lib_import = node->stmt.func_decl.is_lib_import;
   const char *dll_callconv = node->stmt.func_decl.dll_callconv;
 
   // Generate parameter types
@@ -218,6 +219,38 @@ LLVMValueRef codegen_stmt_function(CodeGenContext *ctx, AstNode *node) {
 
     add_symbol(ctx, func_name, func, func_type, true);
 
+    return func;
+  }
+
+  if (is_lib_import) {
+    LLVMValueRef func = LLVMGetNamedFunction(current_llvm_module, func_name);
+    if (!func) {
+      func = LLVMAddFunction(current_llvm_module, func_name, func_type);
+    }
+
+    LLVMSetLinkage(func, LLVMExternalLinkage);
+    LLVMSetFunctionCallConv(func, LLVMCCallConv);
+
+    // Register the lib so the driver picks it up at link time
+    const char *lib_name = node->stmt.func_decl.lib_name;
+    if (lib_name && ctx->current_module &&
+        ctx->current_module->link_lib_count < MAX_LINK_LIBS) {
+      // Deduplicate — don't add if already registered by @link or a prior
+      // #lib_import for the same library
+      bool already_registered = false;
+      for (size_t i = 0; i < ctx->current_module->link_lib_count; i++) {
+        if (strcmp(ctx->current_module->link_libs[i], lib_name) == 0) {
+          already_registered = true;
+          break;
+        }
+      }
+      if (!already_registered) {
+        ctx->current_module->link_libs[ctx->current_module->link_lib_count++] =
+            lib_name;
+      }
+    }
+
+    add_symbol(ctx, func_name, func, func_type, true);
     return func;
   }
 

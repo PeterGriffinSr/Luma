@@ -1,0 +1,12 @@
+@module "main"
+
+@use "std_libc" as c
+
+pub const main -> fn () int {
+  c::puts("hello from libc");
+
+  let n: int = c::atoi("42");
+  let r: double = c::sqrt(144.0);
+
+  return 0;
+}

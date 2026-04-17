@@ -21,6 +21,7 @@
 #include "../c_libs/memory/memory.h"
 
 #define SYMBOL_HASH_SIZE 1024
+#define MAX_LINK_LIBS 64
 
 typedef struct LLVM_Symbol LLVM_Symbol;
 typedef struct CodeGenContext CodeGenContext;
@@ -42,6 +43,9 @@ struct ModuleCompilationUnit {
   LLVM_Symbol *symbols;
   bool is_main_module;
   struct ModuleCompilationUnit *next;
+
+  const char *link_libs[MAX_LINK_LIBS];
+  size_t link_lib_count;
 };
 
 typedef struct ModuleDependencyInfo {
@@ -351,6 +355,7 @@ LLVMValueRef codegen_stmt_program_multi_module(CodeGenContext *ctx,
 LLVMValueRef codegen_stmt_module(CodeGenContext *ctx, AstNode *node);
 LLVMValueRef codegen_stmt_use(CodeGenContext *ctx, AstNode *node);
 LLVMValueRef codegen_stmt_os(CodeGenContext *ctx, AstNode *node);
+LLVMValueRef codegen_stmt_link(CodeGenContext *ctx, AstNode *node);
 
 // =============================================================================
 // AST NODE HANDLERS - EXPRESSION TYPES

@@ -1,0 +1,102 @@
+@module "std_libc"
+
+@link("libc.so.6")
+
+// ============================================================================
+// stdio.h
+// ============================================================================
+
+pub const printf  -> fn (fmt: *byte, val: *byte) int;
+pub const puts    -> fn (s: *byte) int;
+pub const putchar -> fn (c: int) int;
+pub const getchar -> fn () int;
+pub const fflush  -> fn (stream: *void) int;
+
+pub const fopen   -> fn (path: *byte, mode: *byte) *void;
+pub const fclose  -> fn (stream: *void) int;
+pub const fread   -> fn (ptr: *void, size: int, count: int, stream: *void) int;
+pub const fwrite  -> fn (ptr: *void, size: int, count: int, stream: *void) int;
+pub const fgets   -> fn (buf: *byte, n: int, stream: *void) *byte;
+pub const fputs   -> fn (s: *byte, stream: *void) int;
+pub const feof    -> fn (stream: *void) int;
+pub const ferror  -> fn (stream: *void) int;
+pub const rewind  -> fn (stream: *void) void;
+pub const fseek   -> fn (stream: *void, offset: int, whence: int) int;
+pub const ftell   -> fn (stream: *void) int;
+pub const remove  -> fn (path: *byte) int;
+pub const rename  -> fn (old: *byte, new: *byte) int;
+pub const tmpfile -> fn () *void;
+
+// ============================================================================
+// stdlib.h
+// ============================================================================
+
+pub const malloc   -> fn (size: int) *void;
+pub const calloc   -> fn (count: int, size: int) *void;
+pub const realloc  -> fn (ptr: *void, size: int) *void;
+pub const free     -> fn (ptr: *void) void;
+pub const exit     -> fn (code: int) void;
+pub const abort    -> fn () void;
+pub const abs      -> fn (n: int) int;
+pub const atoi     -> fn (s: *byte) int;
+pub const atof     -> fn (s: *byte) double;
+pub const atol     -> fn (s: *byte) int;
+pub const rand     -> fn () int;
+pub const srand    -> fn (seed: int) void;
+pub const getenv   -> fn (name: *byte) *byte;
+pub const system   -> fn (cmd: *byte) int;
+pub const qsort    -> fn (base: *void, count: int, size: int, cmp: *void) void;
+pub const bsearch  -> fn (key: *void, base: *void, count: int, size: int, cmp: *void) *void;
+
+// ============================================================================
+// string.h
+// ============================================================================
+
+pub const strlen   -> fn (s: *byte) int;
+pub const strcpy   -> fn (dst: *byte, src: *byte) *byte;
+pub const strncpy  -> fn (dst: *byte, src: *byte, n: int) *byte;
+pub const strcat   -> fn (dst: *byte, src: *byte) *byte;
+pub const strncat  -> fn (dst: *byte, src: *byte, n: int) *byte;
+pub const strcmp   -> fn (a: *byte, b: *byte) int;
+pub const strncmp  -> fn (a: *byte, b: *byte, n: int) int;
+pub const strchr   -> fn (s: *byte, c: int) *byte;
+pub const strrchr  -> fn (s: *byte, c: int) *byte;
+pub const strstr   -> fn (haystack: *byte, needle: *byte) *byte;
+pub const strtok   -> fn (s: *byte, delim: *byte) *byte;
+pub const memset   -> fn (ptr: *void, val: int, n: int) *void;
+pub const memcpy   -> fn (dst: *void, src: *void, n: int) *void;
+pub const memmove  -> fn (dst: *void, src: *void, n: int) *void;
+pub const memcmp   -> fn (a: *void, b: *void, n: int) int;
+
+// ============================================================================
+// math.h  (also in libc.so.6 on modern glibc — no separate -lm needed)
+// ============================================================================
+
+#lib_import("libm.so")
+pub const sqrt  -> fn (x: double) double;
+#lib_import("libm.so")
+pub const pow   -> fn (base: double, exp: double) double;
+#lib_import("libm.so")
+pub const floor -> fn (x: double) double;
+#lib_import("libm.so")
+pub const ceil  -> fn (x: double) double;
+#lib_import("libm.so")
+pub const fabs  -> fn (x: double) double;
+#lib_import("libm.so")
+pub const fmod  -> fn (x: double, y: double) double;
+#lib_import("libm.so")
+pub const log   -> fn (x: double) double;
+#lib_import("libm.so")
+pub const log2  -> fn (x: double) double;
+#lib_import("libm.so")
+pub const log10 -> fn (x: double) double;
+#lib_import("libm.so")
+pub const exp   -> fn (x: double) double;
+#lib_import("libm.so")
+pub const sin   -> fn (x: double) double;
+#lib_import("libm.so")
+pub const cos   -> fn (x: double) double;
+#lib_import("libm.so")
+pub const tan   -> fn (x: double) double;
+#lib_import("libm.so") 
+pub const atan2 -> fn (y: double, x: double) double;

@@ -182,6 +182,29 @@ Stmt *os_stmt(Parser *parser) {
                         (AstNode *)default_body, line, col);
 }
 
+Stmt *link_stmt(Parser *parser) {
+  int line = p_current(parser).line;
+  int col = p_current(parser).col;
+
+  p_consume(parser, TOK_LINK, "Expected '@link' keyword");
+  p_consume(parser, TOK_LPAREN, "Expected '(' after '@link'");
+
+  if (p_current(parser).type_ != TOK_STRING) {
+    parser_error(parser, "SyntaxError", parser->file_path,
+                 "Expected library name string in '@link'",
+                 p_current(parser).line, p_current(parser).col,
+                 p_current(parser).length);
+    return NULL;
+  }
+
+  const char *lib_name = arena_strdup(parser->arena, get_name(parser));
+  p_advance(parser);
+
+  p_consume(parser, TOK_RPAREN, "Expected ')' to close '@link'");
+
+  return create_link_node(parser->arena, lib_name, line, col);
+}
+
 /**
  * @brief Parses a constant declaration statement
  *

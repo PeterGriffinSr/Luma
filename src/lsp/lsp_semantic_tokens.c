@@ -199,6 +199,8 @@ static TokenClass classify_token(LSPDocument *doc, size_t tok_idx) {
   /* --- Module / import keywords --- */
   case TOK_MODULE:
   case TOK_USE:
+  case TOK_OS:
+  case TOK_LINK:
   case TOK_IMPORT:
   case TOK_AS:
     return (TokenClass){ST_KEYWORD, SM_STATIC};
@@ -223,6 +225,8 @@ static TokenClass classify_token(LSPDocument *doc, size_t tok_idx) {
   /* --- Ownership attributes --- */
   case TOK_RETURNES_OWNERSHIP:
   case TOK_TAKES_OWNERSHIP:
+  case TOK_DLL_IMPORT:
+  case TOK_LIB_IMPORT:
     return (TokenClass){ST_MODIFIER, SM_DEFAULT_LIB};
 
   /* --- Operators --- */
@@ -310,8 +314,9 @@ static TokenClass classify_token(LSPDocument *doc, size_t tok_idx) {
   }
 }
 
-// TODO: Look into this some more currently strings and the default condition seem to be working fun
-// Comments and chars seem to have issues not sure as to way yet
+// TODO: Look into this some more currently strings and the default condition
+// seem to be working fun Comments and chars seem to have issues not sure as to
+// way yet
 static void token_display_col_and_len(Token *tok, int *out_col, int *out_len) {
   int raw_len = (int)tok->length;
 
@@ -330,8 +335,8 @@ static void token_display_col_and_len(Token *tok, int *out_col, int *out_len) {
 
   case TOK_COMMENT:
     /* value excludes the leading // (2 chars) */
-    fprintf(stderr, "[LSP] comment token line: (%d) col: (%d) len: (%d)\n", 
-                                    tok->line, tok->col, tok->length);
+    fprintf(stderr, "[LSP] comment token line: (%d) col: (%d) len: (%d)\n",
+            tok->line, tok->col, tok->length);
     *out_len = raw_len + 2;
     *out_col = (int)tok->col - raw_len;
     break;

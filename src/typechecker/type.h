@@ -85,6 +85,8 @@ typedef struct Scope {
   StaticMemoryAnalyzer *memory_analyzer;
   GrowableArray deferred_frees;
 
+  GrowableArray link_libs;
+
   // Build configuration
   BuildConfig *config;
 } Scope;
@@ -277,6 +279,7 @@ bool typecheck_for_loop_decl(AstNode *node, Scope *scope,
                              ArenaAllocator *arena);
 bool typecheck_loop_decl(AstNode *node, Scope *scope, ArenaAllocator *arena);
 bool typecheck_os_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena);
+bool typecheck_link_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena);
 
 // Expressions
 AstNode *typecheck_binary_expr(AstNode *expr, Scope *scope,

@@ -42,9 +42,23 @@ AstNode *create_os_node(ArenaAllocator *arena, char **platforms,
   return node;
 }
 
+AstNode *create_link_node(ArenaAllocator *arena, const char *lib_name,
+                          size_t line, size_t column) {
+  AstNode *node = create_preprocessor_node(
+      arena, AST_PREPROCESSOR_LINK, Node_Category_PREPROCESSOR, line, column);
+  node->preprocessor.link.lib_name = lib_name;
+  return node;
+}
+
 void apply_dll_import(AstNode *func_node, const char *dll_name,
                       const char *callconv) {
   func_node->stmt.func_decl.is_dll_import = true;
   func_node->stmt.func_decl.dll_name = dll_name;
   func_node->stmt.func_decl.dll_callconv = callconv; // Can be null
+}
+
+void apply_lib_import(AstNode *func_node, const char *lib_name) {
+  func_node->stmt.func_decl.is_lib_import = true;
+  func_node->stmt.func_decl.lib_name = lib_name;
+  // no callconv needed, always cdecl
 }

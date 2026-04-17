@@ -20,6 +20,7 @@ typedef enum {
   AST_PREPROCESSOR_MODULE, // Module declaration
   AST_PREPROCESSOR_USE,    // Use/import statement
   AST_PREPROCESSOR_OS,     // Used to declare things for different os's
+  AST_PREPROCESSOR_LINK,
 
   // Expression nodes
   AST_EXPR_LITERAL,    // Literal values (numbers, strings, booleans)
@@ -172,6 +173,10 @@ struct AstNode {
           bool has_default;      // true if _ => { ... } arm present
           AstNode *default_body; // NULL if has_default is false
         } os;
+
+        struct {
+          const char *lib_name;
+        } link;
       };
     } preprocessor;
 
@@ -390,6 +395,10 @@ struct AstNode {
           const char *dll_name; // "kernel32.dll", NULL if not a dll import
           const char
               *dll_callconv; // "stdcall", "cdecl", NULL = platform default
+
+          // Lib import link
+          bool is_lib_import;
+          const char *lib_name;
         } func_decl;
 
         // If statement
@@ -553,8 +562,11 @@ AstNode *create_use_node(ArenaAllocator *arena, const char *module_name,
 AstNode *create_os_node(ArenaAllocator *arena, char **platforms,
                         AstNode **bodies, size_t arm_count, bool has_default,
                         AstNode *default_body, size_t line, size_t column);
+AstNode *create_link_node(ArenaAllocator *arena, const char *lib_name,
+                          size_t line, size_t column);
 void apply_dll_import(AstNode *func_node, const char *dll_name,
                       const char *callconv);
+void apply_lib_import(AstNode *func_node, const char *lib_name);
 
 // Expression creation functions
 AstNode *create_literal_expr(ArenaAllocator *arena, LiteralType lit_type,

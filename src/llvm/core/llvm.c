@@ -321,6 +321,8 @@ ModuleCompilationUnit *create_module_unit(CodeGenContext *ctx,
   unit->next = ctx->modules;
 
   ctx->modules = unit;
+
+  unit->link_lib_count = 0;
   return unit;
 }
 

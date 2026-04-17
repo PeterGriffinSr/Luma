@@ -273,6 +273,8 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
       continue;
     if (body[j]->type == AST_PREPROCESSOR_OS)
       continue;
+    if (body[j]->type == AST_PREPROCESSOR_LINK)
+      continue;
     if (body[j]->type == AST_STMT_FUNCTION &&
         body[j]->stmt.func_decl.forward_declared)
       continue;
@@ -284,9 +286,11 @@ bool process_module_in_order(const char *module_name, GrowableArray *dep_graph,
     }
   }
 
-  // ===== PASS 3: Typecheck @os blocks =====
+  // ===== PASS 3: Typecheck @os blocks, @links =====
   for (int j = 0; j < body_count; j++) {
     if (!body[j] || body[j]->type != AST_PREPROCESSOR_OS)
+      continue;
+    if (!body[j] || body[j]->type != AST_PREPROCESSOR_LINK)
       continue;
 
     if (!typecheck_os_stmt(body[j], module_scope, arena)) {
@@ -378,6 +382,37 @@ bool typecheck_os_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena) {
       return false;
     }
   }
+
+  return true;
+}
+
+bool typecheck_link_stmt(AstNode *node, Scope *scope, ArenaAllocator *arena) {
+  if (!node || node->type != AST_PREPROCESSOR_LINK) {
+    tc_error(node, "Internal Error", "Expected @link node");
+    return false;
+  }
+
+  const char *lib_name = node->preprocessor.link.lib_name;
+  if (!lib_name || lib_name[0] == '\0') {
+    tc_error(node, "@link Error", "@link requires a non-empty library name");
+    return false;
+  }
+
+  // Find the module scope to attach the link directive to
+  Scope *module_scope = find_containing_module(scope);
+  if (!module_scope) {
+    tc_error(node, "@link Error", "@link must appear at module level");
+    return false;
+  }
+
+  // Store it — codegen will walk module scope links later
+  const char **slot =
+      (const char **)growable_array_push(&module_scope->link_libs);
+  if (!slot) {
+    tc_error(node, "Internal Error", "Out of memory storing @link directive");
+    return false;
+  }
+  *slot = arena_strdup(arena, lib_name);
 
   return true;
 }

@@ -61,7 +61,7 @@ void init_scope(Scope *scope, Scope *parent, const char *name,
   scope->is_module_scope = false;
   scope->associated_node = NULL;
   scope->module_name = NULL;
-  scope->config = parent ? parent->config : NULL;  // ADD THIS LINE
+  scope->config = parent ? parent->config : NULL; // ADD THIS LINE
 
   if (!parent) {
     scope->memory_analyzer = arena_alloc(arena, sizeof(StaticMemoryAnalyzer),
@@ -75,6 +75,7 @@ void init_scope(Scope *scope, Scope *parent, const char *name,
   growable_array_init(&scope->children, arena, 8, sizeof(Scope *));
   growable_array_init(&scope->imported_modules, arena, 4, sizeof(ModuleImport));
   growable_array_init(&scope->deferred_frees, arena, 4, sizeof(const char *));
+  growable_array_init(&scope->link_libs, arena, 4, sizeof(const char *));
 }
 
 Symbol *scope_lookup_with_visibility(Scope *scope, const char *name,
@@ -107,21 +108,21 @@ Symbol *scope_lookup_with_visibility(Scope *scope, const char *name,
         return NULL;
       }
     }
-    
+
     for (size_t i = 0; i < current->imported_modules.count; i++) {
       ModuleImport *import =
           (ModuleImport *)((char *)current->imported_modules.data +
                            i * sizeof(ModuleImport));
-      
+
       // Search in the imported module's scope
       Symbol *found = scope_lookup_current_only_with_visibility(
           import->module_scope, name, scope);
-      
+
       if (found) {
         return found;
       }
     }
-    
+
     current = current->parent;
   }
 
@@ -152,8 +153,8 @@ bool scope_add_symbol_with_ownership(Scope *scope, const char *name,
   Symbol *s = (Symbol *)growable_array_push(&scope->symbols);
   if (!s) {
     if (type) {
-      tc_error(type, "Internal Error",
-               "Out of memory while adding symbol '%s'", name);
+      tc_error(type, "Internal Error", "Out of memory while adding symbol '%s'",
+               name);
     }
     return false;
   }
