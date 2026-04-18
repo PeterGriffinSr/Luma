@@ -9,6 +9,14 @@
 
 @link("libpthread.so.0")
 
+// Opaque type sizes on Linux x86_64
+pub const PTHREAD_T_SIZE:       int = 8;
+pub const PTHREAD_MUTEX_SIZE:   int = 40;
+pub const PTHREAD_COND_SIZE:    int = 48;
+pub const PTHREAD_RWLOCK_SIZE:  int = 56;
+pub const PTHREAD_BARRIER_SIZE: int = 32;
+pub const PTHREAD_ONCE_SIZE:    int = 4;
+
 // ============================================================================
 // Thread create / join / detach / self / exit
 // ============================================================================
