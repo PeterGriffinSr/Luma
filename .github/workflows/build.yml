@@ -44,16 +44,17 @@ jobs:
 
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
-        uses: KyleMayes/install-llvm-action@v2
+        uses: msys2/setup-msys2@v2
         with:
-          version: "20"
- 
-      - name: Debug LLVM install (Windows)
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-llvm
+
+      - name: Add MSYS2 MinGW to PATH (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Write-Host "LLVM_PATH = $env:LLVM_PATH"
-          Get-ChildItem "$env:LLVM_PATH\bin" | Where-Object { $_.Name -like "llvm*" }
+          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Configure (release)
         run: meson setup build/ --buildtype=release
