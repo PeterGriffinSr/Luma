@@ -34,7 +34,7 @@ pub const tmpfile -> fn () *void;
 pub const malloc   -> fn (size: int) *void;
 pub const calloc   -> fn (count: int, size: int) *void;
 pub const realloc  -> fn (ptr: *void, size: int) *void;
-pub const free     -> fn (ptr: *void) void;
+pub const _free     -> fn (ptr: *void) void;
 pub const exit     -> fn (code: int) void;
 pub const abort    -> fn () void;
 pub const abs      -> fn (n: int) int;
@@ -44,7 +44,7 @@ pub const atol     -> fn (s: *byte) int;
 pub const rand     -> fn () int;
 pub const srand    -> fn (seed: int) void;
 pub const getenv   -> fn (name: *byte) *byte;
-pub const system   -> fn (cmd: *byte) int;
+pub const _system   -> fn (cmd: *byte) int;
 pub const qsort    -> fn (base: *void, count: int, size: int, cmp: *void) void;
 pub const bsearch  -> fn (key: *void, base: *void, count: int, size: int, cmp: *void) *void;
 
