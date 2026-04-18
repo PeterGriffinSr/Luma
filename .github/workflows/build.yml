@@ -44,13 +44,9 @@ jobs:
 
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-win64.exe"
-          $installer = "$env:TEMP\llvm-installer.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
-          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20"
  
       - name: Configure (release)
         run: meson setup build/ --buildtype=release
