@@ -50,25 +50,15 @@ jobs:
           update: true
           install: mingw-w64-x86_64-llvm
 
-      - name: Configure Meson native file (Windows)
+      - name: Find llvm-config (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $llvmConfig = "C:\msys64\mingw64\bin\llvm-config.exe"
-          Write-Host "llvm-config exists: $(Test-Path $llvmConfig)"
-          @"
-          [binaries]
-          llvm-config = '$llvmConfig'
-          "@ | Set-Content native.ini
-          Get-Content native.ini
+          Get-ChildItem -Path C:\ -Recurse -Filter "llvm-config.exe" -ErrorAction SilentlyContinue | Select-Object FullName
 
       - name: Configure (release)
         if: runner.os != 'Windows'
         run: meson setup build/ --buildtype=release
-
-      - name: Configure (release, Windows)
-        if: runner.os == 'Windows'
-        run: meson setup build/ --buildtype=release --native-file=native.ini
 
       - name: Build (release)
         run: meson compile -C build/
