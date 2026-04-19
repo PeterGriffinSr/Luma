@@ -17,8 +17,11 @@
  */
 
 #include "memory.h"
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdnoreturn.h>
 #include <string.h>
+#include <stdint.h>
 
 #if defined(_WIN32)
 #include <malloc.h>
@@ -38,6 +41,77 @@
     fprintf(stderr, __VA_ARGS__);                                              \
   } while (0)
 #endif
+
+/**
+ * @brief Prints a fatal error message and exits the program.
+ * @param fmt Format string for the error message.
+ * @param ... Additional arguments for the format string.
+ */
+noreturn void die(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "fatal: ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(EXIT_FAILURE);
+}
+
+/* Allocation wrappers */
+
+/**
+ * @brief Allocates memory and checks for allocation failure. If !size it will
+ * still return a valid pointer that can be freed.
+ * @param size Number of bytes to allocate.
+ * @return Pointer to the allocated memory on success.
+ */
+void *xmalloc(size_t size) {
+    void *ret = malloc(size);
+
+    /* handle malloc(0) as a valid pointer */
+    if (!ret && !size)
+        ret = malloc(1);
+    if (!ret)
+        die("malloc: failed to allocate %zu bytes", size);
+    return ret;
+}
+
+/**
+ * @brief Allocates zero-init memory and checks for allocation failure. If !size
+ * it will still return a valid pointer.
+ * @param nr Number of elements to allocate.
+ * @param size Size of each element.
+ * @return Pointer to the allocated memory on success.
+ */
+void *xcalloc(size_t nr, size_t size) {
+    void *ret;
+
+    if (size && nr > SIZE_MAX / size)
+        die("calloc: size overflow");
+
+    ret = calloc(nr, size);
+    if (!ret && (!nr || !size))
+        ret = calloc(1, 1);
+    if (!ret)
+        die("calloc: failed to allocate %zu bytes", nr * size);
+    return ret;
+}
+
+/**
+ * @brief Duplicates a string and checks for allocation failure.
+ * @param str The string to duplicate.
+ * @return Pointer to the duplicated string on success.
+ */
+char *xstrdup(const char *str) {
+    char *ret;
+
+    if (!str)
+        die("xstrdup: string is NULL");
+    ret = strdup(str);
+    if (!ret)
+        die("xstrdup: failed to duplicate string");
+    return ret;
+}
 
 /**
  * @brief Returns the maximum of two size_t values.

@@ -36,3 +36,6 @@ src/lsp/language-support/client/out
 
 # ignore macOS hidden files
 .DS_Store
+
+# Bear / clangd
+compile_commands.json
