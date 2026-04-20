@@ -1,4 +1,5 @@
 #include "../llvm.h"
+#include "../../c_libs/memory/memory.h"
 #include <stdlib.h>
 
 static FieldToStructEntry *field_to_struct_buckets[SYMBOL_HASH_SIZE] = {0};
@@ -18,7 +19,7 @@ unsigned int hash_string(const char *str) {
 // Symbol cache operations
 void init_symbol_cache(void) {
   if (!global_symbol_cache) {
-    global_symbol_cache = (SymbolHashTable *)calloc(1, sizeof(SymbolHashTable));
+    global_symbol_cache = (SymbolHashTable *)xcalloc(1, sizeof(SymbolHashTable));
   }
 }
 
@@ -42,8 +43,8 @@ void cache_symbol(const char *module_name, const char *symbol_name,
 
   // Add new entry
   SymbolHashEntry *new_entry =
-      (SymbolHashEntry *)malloc(sizeof(SymbolHashEntry));
-  new_entry->key = strdup(key);
+      (SymbolHashEntry *)xmalloc(sizeof(SymbolHashEntry));
+  new_entry->key = xstrdup(key);
   new_entry->symbol = symbol;
   new_entry->next = global_symbol_cache->buckets[bucket];
   global_symbol_cache->buckets[bucket] = new_entry;
@@ -72,7 +73,7 @@ LLVM_Symbol *lookup_cached_symbol(const char *module_name,
 // Struct cache operations
 void init_struct_cache(void) {
   if (!global_struct_cache) {
-    global_struct_cache = (StructHashTable *)calloc(1, sizeof(StructHashTable));
+    global_struct_cache = (StructHashTable *)xcalloc(1, sizeof(StructHashTable));
   }
 }
 
@@ -90,8 +91,8 @@ void cache_struct(const char *name, StructInfo *info) {
   }
 
   StructHashEntry *new_entry =
-      (StructHashEntry *)malloc(sizeof(StructHashEntry));
-  new_entry->name = strdup(name);
+      (StructHashEntry *)xmalloc(sizeof(StructHashEntry));
+  new_entry->name = xstrdup(name);
   new_entry->info = info;
   new_entry->next = global_struct_cache->buckets[bucket];
   global_struct_cache->buckets[bucket] = new_entry;
@@ -136,8 +137,8 @@ void cache_struct_field(const char *field_name, StructInfo *info) {
     }
   }
 
-  FieldToStructEntry *new_entry = malloc(sizeof(FieldToStructEntry));
-  new_entry->field_name = strdup(field_name);
+  FieldToStructEntry *new_entry = xmalloc(sizeof(FieldToStructEntry));
+  new_entry->field_name = xstrdup(field_name);
   new_entry->struct_info = info;
   new_entry->next = field_to_struct_buckets[bucket];
   field_to_struct_buckets[bucket] = new_entry;

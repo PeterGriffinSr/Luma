@@ -43,6 +43,7 @@
 #include <stdalign.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdnoreturn.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -222,6 +223,37 @@ bool growable_array_init(GrowableArray *arr, ArenaAllocator *arena,
  * @return Pointer to the new element's memory slot.
  */
 void *growable_array_push(GrowableArray *arr);
+
+/**
+ * @brief Prints a fatal error message and exits the program.
+ * @param fmt Format string for the error message.
+ * @param ... Additional arguments for the format string.
+ */
+noreturn void die(const char *fmt, ...);
+
+/**
+ * @brief Allocates memory and checks for allocation failure. If !size it will
+ * still return a valid pointer that can be freed.
+ * @param size Number of bytes to allocate.
+ * @return Pointer to the allocated memory on success.
+ */
+void *xmalloc(size_t size);
+
+/**
+ * @brief Allocates zero-init memory and checks for allocation failure. If !size
+ * it will still return a valid pointer.
+ * @param nr Number of elements to allocate.
+ * @param size Size of each element.
+ * @return Pointer to the allocated memory on success.
+ */
+void *xcalloc(size_t nr, size_t size);
+
+/**
+ * @brief Duplicates a string and checks for allocation failure.
+ * @param str The string to duplicate.
+ * @return Pointer to the duplicated string on success.
+ */
+char *xstrdup(const char *str);
 
 #ifdef __cplusplus
 }

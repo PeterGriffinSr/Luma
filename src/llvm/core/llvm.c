@@ -245,15 +245,8 @@ bool compile_modules_to_objects(CodeGenContext *ctx, const char *output_dir) {
   }
 
   // Allocate resources
-  ModuleCompileTask *tasks = malloc(sizeof(ModuleCompileTask) * module_count);
-  pthread_t *threads = malloc(sizeof(pthread_t) * module_count);
-
-  if (!tasks || !threads) {
-    fprintf(stderr, "Failed to allocate memory for compilation tasks\n");
-    free(tasks);
-    free(threads);
-    return false;
-  }
+  ModuleCompileTask *tasks = xmalloc(sizeof(ModuleCompileTask) * module_count);
+  pthread_t *threads = xmalloc(sizeof(pthread_t) * module_count);
 
   // Initialize tasks
   size_t i = 0;
@@ -343,8 +336,8 @@ void set_current_module(CodeGenContext *ctx, ModuleCompilationUnit *module) {
 void add_symbol_to_module(ModuleCompilationUnit *module, const char *name,
                           LLVMValueRef value, LLVMTypeRef type,
                           bool is_function) {
-  LLVM_Symbol *sym = (LLVM_Symbol *)malloc(sizeof(LLVM_Symbol));
-  sym->name = strdup(name);
+  LLVM_Symbol *sym = (LLVM_Symbol *)xmalloc(sizeof(LLVM_Symbol));
+  sym->name = xstrdup(name);
   sym->value = value;
   sym->type = type;
   sym->is_function = is_function;
@@ -585,7 +578,7 @@ LLVMLinkage get_function_linkage(AstNode *node) {
 
 char *process_escape_sequences(const char *input) {
   size_t len = strlen(input);
-  char *output = malloc(len + 1);
+  char *output = xmalloc(len + 1);
   size_t out_idx = 0;
 
   for (size_t i = 0; i < len; i++) {
